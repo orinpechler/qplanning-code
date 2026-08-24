@@ -1,0 +1,52 @@
+# Which runs feed which column of the results table.
+#
+#   qplanning report --config configs/report.yaml
+#
+# Reads the per-episode CSVs listed below and aggregates them: per-task success rate,
+# per-task mean length over successful episodes, then an unweighted mean across tasks.
+# Columns are restricted to the tasks all of them evaluated, so a task that failed under one
+# condition cannot change another's denominator.
+#
+# The two Q-Planning columns come from a self-improvement run's held-out block -- the
+# episodes whose seeds are fixed across iterations and which are never trained on. Iteration
+# 0 measures the Q-function before any online updates; the last measures it after.
+#
+# With `iterations: 10` the directories are iter_000..iter_009, and iter_009's held-out
+# block is measured before iter_009's own update -- so it reflects nine updates. Raise
+# `iterations` if you want the tenth measured too.
+#
+# The `iter_000*` glob also matches the iter_000_shard00.. directories a sharded collection
+# writes.
+
+root: ${env:QPLANNING_ROOT:./artifacts}/runs
+
+benchmarks:
+  - label: LIBERO-Spatial
+    columns:
+      baseline: libero_spatial_baseline/episodes*.csv
+      offline: libero_spatial_self_improve/iter_000*/heldout_episodes*.csv
+      self_improved: libero_spatial_self_improve/iter_009*/heldout_episodes*.csv
+
+  - label: LIBERO-Object
+    columns:
+      baseline: libero_object_baseline/episodes*.csv
+      offline: libero_object_self_improve/iter_000*/heldout_episodes*.csv
+      self_improved: libero_object_self_improve/iter_009*/heldout_episodes*.csv
+
+  - label: LIBERO-Goal
+    columns:
+      baseline: libero_goal_baseline/episodes*.csv
+      offline: libero_goal_self_improve/iter_000*/heldout_episodes*.csv
+      self_improved: libero_goal_self_improve/iter_009*/heldout_episodes*.csv
+
+  - label: LIBERO-10
+    columns:
+      baseline: libero_10_baseline/episodes*.csv
+      offline: libero_10_self_improve/iter_000*/heldout_episodes*.csv
+      self_improved: libero_10_self_improve/iter_009*/heldout_episodes*.csv
+
+  - label: RoboTwin
+    columns:
+      baseline: robotwin_baseline/episodes*.csv
+      offline: robotwin_self_improve/iter_000*/heldout_episodes*.csv
+      self_improved: robotwin_self_improve/iter_009*/heldout_episodes*.csv

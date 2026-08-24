@@ -1,0 +1,8 @@
+# RoboTwin: the policy alone, with no value guidance.
+# Identical to qplanning_offline.yaml except for `planner.type`.
+extends: qplanning_offline.yaml
+
+run_name: robotwin_baseline
+
+planner:
+  type: none

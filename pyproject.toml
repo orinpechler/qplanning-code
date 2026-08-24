@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qplanning"
+version = "1.0.0"
+description = "Value-guided action selection and self-improvement for frozen behaviour-cloning policies"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Varun Giridhar" },
+    { name = "Anant Khandelwal" },
+    { name = "Jeremy A. Collins" },
+    { name = "Ignat Georgiev" },
+    { name = "Animesh Garg" },
+]
+keywords = ["robotics", "imitation-learning", "q-learning", "vision-language-action", "self-improvement"]
+
+# The Q-function, the planner and the loops live in this package. Everything they build on
+# -- the FastWAM policy, LeRobotDataset, the processor pipelines, the LIBERO/RoboTwin env
+# wrappers -- comes from the LeRobot fork below, pinned to the exact commit the paper's
+# results were produced with. A tag rather than a branch, so the dependency cannot shift
+# underneath a release.
+dependencies = [
+    "lerobot[q_function] @ git+https://github.com/varungiridhar/lerobot.git@qplanning-release-v1",
+    "draccus==0.10.0",
+    "pyyaml>=6.0",
+    "numpy",
+    "torch>=2.7.1,<2.9.0",
+    "huggingface-hub>=0.34.2",
+    # Used to verify a replay-buffer shard is readable before training on it.
+    "pyarrow>=14.0",
+    # Multi-GPU Q-function training is launched through `accelerate`.
+    "accelerate>=1.7.0",
+]
+
+[project.optional-dependencies]
+# LIBERO evaluation (4 suites). Pulls hf-libero -> robosuite 1.4.0 + mujoco; needs MUJOCO_GL=egl.
+libero = ["lerobot[libero] @ git+https://github.com/varungiridhar/lerobot.git@qplanning-release-v1"]
+# RoboTwin evaluation. NOTE: this extra is NOT sufficient on its own -- RoboTwin also needs
+# sapien/mplib/curobo, which cannot be resolved by pip alongside LeRobot's tree.
+# See docs/setup.md section 3 for the full procedure.
+robotwin = ["lerobot[robotwin] @ git+https://github.com/varungiridhar/lerobot.git@qplanning-release-v1"]
+dev = ["pytest>=8.1.0", "pytest-timeout>=2.4.0", "ruff>=0.6.0", "pre-commit>=3.7.0"]
+
+[project.scripts]
+qplanning = "qplanning.cli:main"
+
+[project.urls]
+Homepage = "https://varungiridhar.github.io/qplanning"
+
+[tool.setuptools.packages.find]
+include = ["qplanning*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["E501"]

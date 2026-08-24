@@ -1,0 +1,36 @@
+# RoboTwin: the policy under Q-guided action selection.
+# No online updates -- the Q-function is whatever checkpoint you point at.
+extends: ../base.yaml
+
+run_name: robotwin_qplanning_offline
+
+benchmark:
+  name: robotwin
+  env_type: robotwin
+  # `paper47` is the 50-task suite minus open_laptop, place_object_scale and
+  # put_object_cabinet, whose check_success() reads an attribute that only the scripted
+  # demo policy sets, so they raise under any learned policy. Use `all` to include them
+  # and watch them fail. See qplanning/benchmarks/robotwin.py.
+  tasks: paper47
+  episode_length: null      # RoboTwin's own per-task limit
+
+paths:
+  bc_checkpoint: ${env:QPLANNING_BC_CKPT_ROBOTWIN}
+  # Empty is fine for `planner.type: none` and for training a Q-function.
+  q_checkpoint: ${env:QPLANNING_Q_CKPT_ROBOTWIN:}
+  dataset_root: ${env:QPLANNING_ROBOTWIN_DATASET_ROOT:}
+  robotwin_root: ${env:ROBOTWIN_ROOT}
+
+qfunction:
+  camera_keys:
+    - observation.images.cam_high
+    - observation.images.cam_left_wrist
+    - observation.images.cam_right_wrist
+
+planner:
+  type: q_weighted
+  n_samples: 32       # N on RoboTwin -- half of LIBERO's, to stay inside the replan budget
+  n_elites: 8         # K
+
+execution:
+  n_action_steps: 24  # RoboTwin replans less often than LIBERO

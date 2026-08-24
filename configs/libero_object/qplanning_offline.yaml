@@ -1,0 +1,27 @@
+# LIBERO-Object: the policy under Q-guided action selection.
+# No online updates -- the Q-function is whatever checkpoint you point at.
+extends: ../base.yaml
+
+run_name: libero_object_qplanning_offline
+
+benchmark:
+  name: libero_object
+  env_type: libero
+  suite: libero_object
+  tasks: all
+  # null means the suite's own step budget, which is what the reported runs used.
+  episode_length: null
+
+paths:
+  bc_checkpoint: ${env:QPLANNING_BC_CKPT_LIBERO}
+  # Empty is fine for `planner.type: none` and for training a Q-function.
+  q_checkpoint: ${env:QPLANNING_Q_CKPT_LIBERO:}
+  dataset_root: ${env:QPLANNING_DATA_ROOT:}
+
+qfunction:
+  camera_keys: [observation.images.image, observation.images.image2]
+
+planner:
+  type: q_weighted
+  n_samples: 64      # N on LIBERO
+  n_elites: 16       # K

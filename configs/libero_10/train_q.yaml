@@ -1,0 +1,13 @@
+# LIBERO-10: train a Q-function on demonstrations.
+# Only needed if you are not using an existing checkpoint.
+extends: qplanning_offline.yaml
+
+run_name: libero_10_train_q
+
+train_q:
+  steps: 40000
+  batch_size: 48
+  num_gpus: 4
+  dataset:
+    repo_ids: [HuggingFaceVLA/libero]
+    bucket_overrides: {HuggingFaceVLA/libero: q5}

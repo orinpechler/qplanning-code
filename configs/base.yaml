@@ -1,0 +1,117 @@
+# Defaults shared by every Q-Planning run.
+#
+# Benchmark configs in the sibling directories extend this file and override only what
+# genuinely differs, which is usually very little.
+#
+# Nothing here is an absolute path. Locations come from ${env:...} references filled in by
+# your .env (copy .env.example), and every one of them is checked by `qplanning doctor`.
+
+run_name: qplanning
+seed: 42
+
+paths:
+  root: ${env:QPLANNING_ROOT:./artifacts}
+  # Filled in per benchmark; declared here so ${cfg:paths.*} always resolves.
+  bc_checkpoint: null
+  q_checkpoint: null
+  dataset_root: null
+  wan22_weights: ${env:QPLANNING_WAN22_DIR:}
+  robotwin_root: ${env:ROBOTWIN_ROOT:}
+  hf_home: ${env:QPLANNING_HF_HOME:}
+  output_dir: ${cfg:paths.root}/runs/${cfg:run_name}
+
+bc:
+  # Any policy registered via @register_bc; see docs/configuration.md to plug in your own.
+  type: fastwam
+  checkpoint: ${cfg:paths.bc_checkpoint}
+  device: cuda
+  dtype: bfloat16
+  baseline_denoise_steps: 10   # full-quality BC pass, used when planner.type is `none`
+
+qfunction:
+  checkpoint: ${cfg:paths.q_checkpoint}
+  # H = 32, inherited from FastWAM's action horizon. The planner asserts Q.h == BC.chunk_size.
+  h: 32
+  gamma: 0.99
+  # HL-Gauss categorical head: B bins spanning [v_min, v_max], kernel width ~= bin spacing.
+  num_bins: 101
+  v_min: -0.01
+  v_max: 1.01
+  hl_gauss_sigma: 0.0075
+  target_tau: 0.005        # EMA rate for the target network
+  dino_model_name: facebook/dinov2-large
+  text_encoder_model: google/t5-v1_1-base
+  dim_model: 1024
+  n_heads: 16
+  dim_feedforward: 4096
+  n_decoder_layers: 18
+  reward_mode: sparse
+  step_reward: 0.0
+  terminal_bonuses: {q5: 1.0}
+
+planner:
+  # `q_weighted`: draw N chunks from a short sampling pass, score them all in one batched
+  # Q-decoder pass, execute the softmax-Q-weighted mean of the top K. Set `none` to run the
+  # policy unguided -- that single field is the whole difference between the two.
+  type: q_weighted
+  n_samples: 64            # N
+  n_elites: 16             # K (0 = use all N)
+  temperature: 1.0         # lambda
+  denoise_steps: 3         # fewer steps than the baseline: keeps the N draws diverse
+  seed: null               # null inherits `seed`
+
+execution:
+  n_action_steps: 10       # execute this many of the H=32 steps, then replan
+
+eval:
+  episodes_per_task: 20
+  start_seed: 42
+  deterministic: true      # eval parity: deterministic kernels, TF32 off, cudnn.benchmark off
+  max_episodes_rendered: 0
+  shard: null              # "k/n" to split tasks across jobs
+
+train_q:
+  steps: 40000
+  batch_size: 48
+  num_gpus: 4
+  optimizer_lr: 3.0e-4
+  optimizer_lr_backbone: 9.0e-5
+  weight_decay: 1.0e-4
+  lr_scheduler: cosine_decay_with_warmup
+  lr_warmup_steps: 2000
+  lr_decay_steps: 40000
+  lr_decay_min: 1.0e-6
+  save_freq: 1000
+  log_freq: 50
+  num_workers: 6
+  test_split_ratio: 0.1
+  test_freq: 500
+  test_n_batches: 1
+  dataset:
+    root: ${cfg:paths.dataset_root}
+    use_imagenet_stats: false
+  wandb:
+    project: ${env:QPLANNING_WANDB_PROJECT:}
+    entity: ${env:QPLANNING_WANDB_ENTITY:}
+
+self_improve:
+  iterations: 10
+  start_iteration: 0
+  # Each iteration rolls out two blocks per task in one pass. The held-out block has seeds
+  # fixed across iterations and is never added to the buffer -- it is the measurement.
+  # The train block has advancing seeds and is what the Q-function learns from.
+  heldout_episodes_per_task: 20
+  train_episodes_per_task: 10
+  heldout_seed_base: 42
+  finetune_steps: 200      # S gradient steps per iteration; the BC policy is never updated
+  finetune_lr: 1.0e-5
+  batch_size: 48
+  online_fraction: 0.5     # half of each minibatch from online rollouts, half from demos
+  grad_clip_norm: 10.0
+  collect_shards: 1
+  min_shards_to_finetune: null   # null -> ceil(collect_shards / 2)
+  offline:
+    root: ${cfg:paths.dataset_root}
+  wandb:
+    project: ${env:QPLANNING_WANDB_PROJECT:}
+    entity: ${env:QPLANNING_WANDB_ENTITY:}

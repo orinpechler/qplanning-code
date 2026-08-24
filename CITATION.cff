@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+message: If you use this software, please cite the paper below.
+title: "Q-Planning: Beyond Imitation — Self-Improving Robot Policies via Off-Policy Q-Planning"
+abstract: >-
+  Companion code for the CoRL 2026 paper. Pairs a frozen behaviour-cloning policy with a
+  small off-policy Q-function over action chunks, uses the Q-function to select among the
+  policy's own proposals at inference, and improves by updating only the Q-function on
+  deployment rollouts — including failures, which imitation cannot use.
+license: Apache-2.0
+type: software
+authors:
+  - family-names: Giridhar
+    given-names: Varun
+  - family-names: Khandelwal
+    given-names: Anant
+  - family-names: Collins
+    given-names: Jeremy A.
+  - family-names: Georgiev
+    given-names: Ignat
+  - family-names: Garg
+    given-names: Animesh
+preferred-citation:
+  type: conference-paper
+  title: "Beyond Imitation: Self-Improving Robot Policies via Off-Policy Q-Planning"
+  collection-title: Conference on Robot Learning (CoRL)
+  year: 2026
+  authors:
+    - family-names: Giridhar
+      given-names: Varun
+    - family-names: Khandelwal
+      given-names: Anant
+    - family-names: Collins
+      given-names: Jeremy A.
+    - family-names: Georgiev
+      given-names: Ignat
+    - family-names: Garg
+      given-names: Animesh

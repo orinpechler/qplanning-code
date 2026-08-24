@@ -1,0 +1,17 @@
+# RoboTwin: train a Q-function on demonstrations.
+# Only needed if you are not using an existing checkpoint.
+extends: qplanning_offline.yaml
+
+run_name: robotwin_train_q
+
+train_q:
+  steps: 80000
+  batch_size: 48
+  num_gpus: 4
+  lr_decay_steps: 80000
+  dataset:
+    # `local/<name>` marks a dataset you provide yourself: point
+    # QPLANNING_ROBOTWIN_DATASET_ROOT at a local LeRobotDataset directory whose
+    # name matches. See docs/setup.md.
+    repo_ids: [local/robotwin2.0]
+    bucket_overrides: {local/robotwin2.0: q5}

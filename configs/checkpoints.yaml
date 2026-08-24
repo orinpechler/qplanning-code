@@ -1,0 +1,46 @@
+# Released model weights.
+#
+# The Q-Planning checkpoints are not published yet. Until they are, leave `org` empty and
+# point the variables in your .env at local directories — every checkpoint field accepts a
+# filesystem path as readily as a Hugging Face repo id, and `qplanning doctor` will tell you
+# which are still unresolved.
+#
+# When the weights go up, set `org` to the Hugging Face organisation hosting them and
+# `qplanning fetch-checkpoints` will download everything in one step.
+
+org: ""
+
+checkpoints:
+  bc_libero:
+    repo_id: ${cfg:org}/qplanning-fastwam-libero
+    env_var: QPLANNING_BC_CKPT_LIBERO
+    size_gb: 13
+    description: Frozen FastWAM policy for the four LIBERO suites (chunk 32, 2 cameras).
+
+  bc_robotwin:
+    repo_id: ${cfg:org}/qplanning-fastwam-robotwin
+    env_var: QPLANNING_BC_CKPT_ROBOTWIN
+    size_gb: 25
+    description: Frozen FastWAM policy for RoboTwin (chunk 32, 14-DoF bimanual).
+
+  q_libero:
+    repo_id: ${cfg:org}/qplanning-qfunction-libero
+    env_var: QPLANNING_Q_CKPT_LIBERO
+    size_gb: 5
+    description: Q-function trained on the LIBERO demonstrations.
+
+  q_robotwin:
+    repo_id: ${cfg:org}/qplanning-qfunction-robotwin
+    env_var: QPLANNING_Q_CKPT_ROBOTWIN
+    size_gb: 5
+    description: Q-function trained on the RoboTwin demonstrations.
+
+  # Base weights FastWAM's VAE and text encoder load from. These are NOT inside the policy
+  # checkpoint and are published independently, so this one is fetchable today. Also place
+  # DiffSynth-Studio/Wan-Series-Converted-Safetensors and Wan-AI/Wan2.1-T2V-1.3B (tokenizer
+  # only) in the same directory.
+  wan22:
+    repo_id: Wan-AI/Wan2.2-TI2V-5B
+    env_var: QPLANNING_WAN22_DIR
+    size_gb: 24
+    description: Wan2.2 base weights required by the policy.

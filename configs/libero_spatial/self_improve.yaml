@@ -1,0 +1,16 @@
+# LIBERO-Spatial: the self-improvement loop.
+# Rolls out the planner, refines only the Q-function on what it collects,
+# and repeats. The policy is frozen throughout.
+extends: qplanning_offline.yaml
+
+run_name: libero_spatial_self_improve
+
+self_improve:
+  iterations: 10
+  heldout_episodes_per_task: 20   # same protocol as the standalone eval above
+  train_episodes_per_task: 10
+  finetune_steps: 200             # S
+  collect_shards: 1               # raise to fan collection out across jobs
+  offline:
+    repo_ids: [HuggingFaceVLA/libero]
+    bucket_overrides: {HuggingFaceVLA/libero: q5}

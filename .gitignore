@@ -1,0 +1,32 @@
+# Local configuration — never commit; see .env.example
+.env
+
+# Cluster profiles are site-specific: ship only the template.
+scripts/slurm/profiles/*.env
+!scripts/slurm/profiles/generic.env
+
+# Optional local list of site-specific strings for the leak scanner.
+tests/forbidden_strings.txt
+
+# Run outputs
+artifacts/
+runs/
+outputs/
+slurm_out/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/

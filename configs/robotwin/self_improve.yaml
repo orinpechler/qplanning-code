@@ -1,0 +1,22 @@
+# RoboTwin: the self-improvement loop.
+# Rolls out the planner, refines only the Q-function on what it collects,
+# and repeats. The policy is frozen throughout.
+extends: qplanning_offline.yaml
+
+run_name: robotwin_self_improve
+
+self_improve:
+  iterations: 10
+  heldout_episodes_per_task: 20
+  train_episodes_per_task: 10
+  finetune_steps: 200
+  # 47 RoboTwin tasks are far slower to roll out than LIBERO's 10, and holding many SAPIEN
+  # simulators open exhausts host RAM, so collection is sharded across jobs by default.
+  collect_shards: 16
+  min_shards_to_finetune: 12
+  offline:
+    # `local/<name>` marks a dataset you provide yourself: point
+    # QPLANNING_ROBOTWIN_DATASET_ROOT at a local LeRobotDataset directory whose
+    # name matches. See docs/setup.md.
+    repo_ids: [local/robotwin2.0]
+    bucket_overrides: {local/robotwin2.0: q5}
