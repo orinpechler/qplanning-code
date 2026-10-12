@@ -31,7 +31,15 @@ from qplanning.data.online_buffer import (
     save_iteration,
     validate_shards,
 )
-from qplanning.envs import apply_shard, open_task_envs, resolve_tasks, task_label
+from qplanning.envs import (
+    apply_shard,
+    init_state_schedule,
+    num_init_states,
+    open_task_envs,
+    resolve_tasks,
+    set_init_state,
+    task_label,
+)
 from qplanning.utils.records import EpisodeRecord, write_episodes
 
 if TYPE_CHECKING:
@@ -113,6 +121,33 @@ def _task_description(env: Any) -> str:
     return ""
 
 
+def block_init_states(cfg: "RunConfig", iteration: int, available: int
+                      ) -> tuple[list[int], list[int]]:
+    """LIBERO initial states for this iteration's held-out and training blocks.
+
+    The held-out block uses the same states every iteration. The training block draws from
+    the states the held-out block does not use and advances through them across iterations,
+    so the buffer keeps seeing new layouts and never one the measurement is taken on.
+    """
+    si = cfg.self_improve
+    try:
+        heldout = init_state_schedule(si.heldout_episodes_per_task, si.heldout_init_state_ids,
+                                      available)
+        train = init_state_schedule(
+            si.train_episodes_per_task, si.train_init_state_ids, available,
+            offset=iteration * si.train_episodes_per_task, exclude=heldout,
+        )
+    except ValueError as exc:
+        raise ConfigError(f"self_improve initial states: {exc}") from None
+    shared = sorted(set(heldout) & set(train))
+    if shared:
+        raise ConfigError(
+            f"initial states {shared} are in both the held-out and the training block; the "
+            "Q-function would be trained on layouts its held-out score is measured on"
+        )
+    return heldout, train
+
+
 def collect(cfg: "RunConfig", iteration: int, policy: Any, processors: dict[str, Any],
             camera_key_map: dict[str, str]) -> tuple[list[dict], list[EpisodeRecord], list[str]]:
     """Roll out the held-out and training blocks for this job's tasks."""
@@ -120,6 +155,9 @@ def collect(cfg: "RunConfig", iteration: int, policy: Any, processors: dict[str,
     all_tasks = resolve_tasks(cfg)
     shard = cfg.eval.shard
     my_tasks = apply_shard(all_tasks, shard)
+    is_libero = cfg.benchmark.env_type == "libero"
+    if not is_libero and (si.heldout_init_state_ids is not None or si.train_init_state_ids is not None):
+        raise ConfigError("self_improve.*_init_state_ids apply to LIBERO only; RoboTwin varies by seed")
 
     # Seeds are derived from a task's index in the FULL list, so a sharded run reproduces
     # exactly the episodes an unsharded one would have run.
@@ -137,19 +175,30 @@ def collect(cfg: "RunConfig", iteration: int, policy: Any, processors: dict[str,
                 for task_id, env in sorted(per_task_envs.items()):
                     label = task_label(cfg, task, task_id, env)
                     offset = task_index if cfg.benchmark.env_type == "robotwin" else task_id
+                    if is_libero:
+                        heldout_states, train_states = block_init_states(
+                            cfg, iteration, num_init_states(env))
+                    else:
+                        heldout_states = [None] * si.heldout_episodes_per_task
+                        train_states = [None] * si.train_episodes_per_task
 
                     for i in range(si.heldout_episodes_per_task):
                         seed = si.heldout_seed_base + offset * si.heldout_episodes_per_task + i
+                        if heldout_states[i] is not None:
+                            set_init_state(env, heldout_states[i])
                         episode = run_episode(env, policy, processors, seed)
                         heldout.append(EpisodeRecord(
                             task_id=task_id, task_name=label, episode=i,
                             success=bool(episode["success"]),
                             episode_length=int(episode["action"].shape[0]), seed=seed,
+                            init_state=heldout_states[i],
                         ))
 
                     for j in range(si.train_episodes_per_task):
                         seed = (train_seed_base + TRAIN_SEED_STRIDE
                                 + offset * si.train_episodes_per_task + j)
+                        if train_states[j] is not None:
+                            set_init_state(env, train_states[j])
                         episode = run_episode(env, policy, processors, seed)
                         for src, dst in camera_key_map.items():
                             if src in episode:
@@ -158,6 +207,9 @@ def collect(cfg: "RunConfig", iteration: int, policy: Any, processors: dict[str,
 
                     n_ok = sum(r.success for r in heldout if r.task_name == label)
                     log.info("  %-38s held-out %d/%d", label, n_ok, si.heldout_episodes_per_task)
+        except ConfigError:
+            # A bad initial-state split is the run's mistake, not this task's.
+            raise
         except Exception as exc:  # noqa: BLE001
             # One task must not cost the whole iteration; three RoboTwin tasks raise from
             # their own success check under any learned policy.

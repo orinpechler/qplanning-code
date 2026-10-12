@@ -30,6 +30,8 @@ class EpisodeRecord:
     success: bool
     episode_length: int
     seed: int | None = None
+    #: The LIBERO initial state (0..49) the episode started from; None on RoboTwin.
+    init_state: int | None = None
     sum_reward: float | None = None
     wall_s: float | None = None
     #: Mean Q-value across the candidates at the episode's final planning step, when a

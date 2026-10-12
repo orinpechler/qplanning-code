@@ -8,11 +8,18 @@ one call and yields all ten of its tasks at once. RoboTwin tasks are separate SA
 simulators, and holding dozens open exhausts host memory long before it exhausts the GPU, so
 they are built one at a time and closed immediately -- hence the iterator interface rather
 than a dictionary of live environments.
+
+LIBERO also pins each episode's starting layout. Every task ships a fixed set of initial
+states (50 per task), and LeRobot's wrapper restores ``init_states[episode_index]`` on every
+reset, overwriting whatever the reset seed produced. Because one environment is built per
+task and reset for every episode, the episode index is always 0 -- so without
+:func:`set_init_state`, every episode of a task starts from the same layout and only the
+policy's sampling noise varies between them.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -98,6 +105,63 @@ def open_task_envs(cfg: "RunConfig", task: str) -> Iterator[tuple[Any, dict[int,
                 env.close()
             except Exception:  # noqa: BLE001 - a close failure must not mask a real error
                 pass
+
+
+def _libero_env(env: Any) -> Any:
+    """The single LeRobot ``LiberoEnv`` inside a one-env vector env."""
+    inner = getattr(env, "envs", None)
+    target = inner[0] if inner else env
+    target = getattr(target, "unwrapped", target)
+    if not hasattr(target, "_init_states") or not hasattr(target, "_init_state_id"):
+        raise RuntimeError(
+            f"{type(target).__name__} exposes no `_init_states` / `_init_state_id`; the pinned "
+            "LeRobot fork's LiberoEnv has changed, so the initial state cannot be selected."
+        )
+    if target._init_states is None:
+        raise RuntimeError("LiberoEnv was built with init_states=False, so there is nothing to select")
+    return target
+
+
+def num_init_states(env: Any) -> int:
+    """How many fixed initial states this LIBERO task ships (50 for every standard task)."""
+    return len(_libero_env(env)._init_states)
+
+
+def set_init_state(env: Any, index: int) -> None:
+    """Make the next ``reset()`` restore LIBERO initial state ``index``."""
+    target = _libero_env(env)
+    available = len(target._init_states)
+    if not 0 <= index < available:
+        raise ValueError(f"initial state {index} out of range; this task has {available}")
+    target._init_state_id = index
+
+
+def init_state_schedule(
+    n_episodes: int,
+    ids: Sequence[int] | None,
+    available: int,
+    *,
+    offset: int = 0,
+    exclude: Collection[int] = (),
+) -> list[int]:
+    """The initial state for each of ``n_episodes`` episodes.
+
+    Episode ``e`` takes entry ``offset + e`` of a pool, wrapping around once the pool is
+    exhausted. The pool is ``ids`` when given, otherwise every state not in ``exclude`` --
+    so with defaults, episodes 0..49 cover a task's 50 layouts once each, which is the
+    standard LIBERO protocol.
+    """
+    if ids is not None:
+        pool = list(ids)
+        out_of_range = [i for i in pool if not 0 <= i < available]
+        if out_of_range:
+            raise ValueError(f"initial state ids {out_of_range} out of range; tasks have {available}")
+    else:
+        pool = [i for i in range(available) if i not in set(exclude)]
+    if not pool and n_episodes > 0:
+        raise ValueError(f"no initial states left to draw from ({available} available, "
+                         f"{len(set(exclude))} excluded)")
+    return [pool[(offset + e) % len(pool)] for e in range(n_episodes)]
 
 
 def task_label(cfg: "RunConfig", task: str, task_id: int, env: Any) -> str:

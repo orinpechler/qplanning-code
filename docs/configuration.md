@@ -54,10 +54,17 @@ planner:
 execution:
   n_action_steps: 10  # steps executed before replanning
 
+eval:
+  episodes_per_task: 20
+  init_state_ids: null  # LIBERO: null = episode e starts from initial state e (of 50);
+                        # a list = cycle through those states, e.g. [30, 31, ..., 49]
+
 self_improve:
   iterations: 10
   heldout_episodes_per_task: 20   # fixed seeds, never trained on: this is the measurement
   train_episodes_per_task: 10     # advancing seeds, appended to the buffer
+  heldout_init_state_ids: null    # LIBERO: null = states 0..19
+  train_init_state_ids: null      # LIBERO: null = all other states, advancing per iteration
   finetune_steps: 200             # S, per iteration
   online_fraction: 0.5            # online share of each minibatch
   collect_shards: 1               # raise to fan collection across jobs

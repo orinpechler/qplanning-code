@@ -144,6 +144,11 @@ class EvalConfig:
 
     episodes_per_task: int = 20
     start_seed: int = 42
+    # LIBERO only: which of a task's 50 fixed initial states each episode starts from.
+    # None: episode e uses state e (mod 50), the standard one-layout-per-episode protocol.
+    # A list: episode e uses ids[e mod len(ids)]. [0] reproduces the original release, which
+    # started every episode of a task from state 0.
+    init_state_ids: Optional[list[int]] = None
     # Eval-parity determinism: deterministic kernels, TF32 off, cudnn.benchmark off.
     # This is what the reported success rates were measured under.
     deterministic: bool = True
@@ -206,6 +211,9 @@ class SelfImproveConfig:
     seeds that are fixed across iterations and is never written to the replay buffer -- it is
     the measurement, and its iteration-0 and iteration-N values are the two Q-Planning
     numbers for the loop. The *train* block uses advancing seeds and feeds the buffer.
+
+    On LIBERO the two blocks also draw from disjoint sets of initial states, so the buffer
+    never contains a layout the held-out measurement is taken on.
     """
 
     iterations: int = 10
@@ -213,6 +221,11 @@ class SelfImproveConfig:
     train_episodes_per_task: int = 10
     heldout_episodes_per_task: int = 20
     heldout_seed_base: int = 42
+    # LIBERO initial states for each block (see EvalConfig.init_state_ids). None for the
+    # held-out block means states 0..heldout_episodes_per_task-1; None for the train block
+    # means every remaining state, cycled through across iterations. Overlap is an error.
+    heldout_init_state_ids: Optional[list[int]] = None
+    train_init_state_ids: Optional[list[int]] = None
     finetune_steps: int = 200         # S
     finetune_lr: float = 1e-5
     batch_size: int = 48

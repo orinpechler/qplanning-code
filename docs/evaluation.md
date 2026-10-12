@@ -13,6 +13,21 @@ exactly and that no reported episode was ever trained on.
 
 `configs/report.yaml` declares which files feed which column.
 
+## Initial states (LIBERO)
+
+Every LIBERO task ships 50 fixed initial states, and the environment restores one of them on
+every reset, so the reset seed does not change the layout. Each episode therefore picks its
+state explicitly: by default episode *e* starts from state *e*, so 50 episodes per task
+cover every layout once (the standard LIBERO protocol), and 20 cover states 0–19. Set
+`eval.init_state_ids` to evaluate on a chosen subset, e.g. a held-out split. The state each
+episode used is recorded in the `init_state` column of `episodes.csv`.
+
+The first release did not do this: every episode of a task started from state 0, and only
+the policy's sampling noise varied. `--eval.init_state_ids=[0]` reproduces that.
+
+In self-improvement the held-out and training blocks draw from disjoint states (by default
+0–19 held out, the remaining 30 for training), and an overlapping split is rejected.
+
 ## Commands
 
 ```bash

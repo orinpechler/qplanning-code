@@ -16,7 +16,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from qplanning.config.loader import ConfigError, dump, load, load_dotenv
-from qplanning.envs import apply_shard, open_task_envs, resolve_tasks, task_label
+from qplanning.envs import (
+    apply_shard,
+    init_state_schedule,
+    num_init_states,
+    open_task_envs,
+    resolve_tasks,
+    set_init_state,
+    task_label,
+)
 from qplanning.utils.records import EpisodeRecord, write_episodes
 
 if TYPE_CHECKING:
@@ -109,6 +117,9 @@ def evaluate(cfg: "RunConfig") -> list[EpisodeRecord]:
 
     tasks = apply_shard(resolve_tasks(cfg), cfg.eval.shard)
     log.info("evaluating %d task group(s): %s", len(tasks), ", ".join(tasks))
+    is_libero = cfg.benchmark.env_type == "libero"
+    if not is_libero and cfg.eval.init_state_ids is not None:
+        raise ConfigError("eval.init_state_ids applies to LIBERO only; RoboTwin varies by seed")
 
     records: list[EpisodeRecord] = []
     policy: "QPlanningPolicy | None" = None
@@ -133,8 +144,13 @@ def evaluate(cfg: "RunConfig") -> list[EpisodeRecord]:
 
             for task_id, env in sorted(per_task_envs.items()):
                 label = task_label(cfg, task, task_id, env)
+                states = (init_state_schedule(cfg.eval.episodes_per_task, cfg.eval.init_state_ids,
+                                              num_init_states(env))
+                          if is_libero else [None] * cfg.eval.episodes_per_task)
                 for episode in range(cfg.eval.episodes_per_task):
                     seed = cfg.eval.start_seed + task_id * cfg.eval.episodes_per_task + episode
+                    if states[episode] is not None:
+                        set_init_state(env, states[episode])
                     started = time.time()
                     try:
                         success, length, reward, final_q = run_episode(env, policy, processors, seed)
@@ -152,13 +168,15 @@ def evaluate(cfg: "RunConfig") -> list[EpisodeRecord]:
                             success=success,
                             episode_length=length,
                             seed=seed,
+                            init_state=states[episode],
                             sum_reward=reward,
                             wall_s=round(time.time() - started, 2),
                             q_final=final_q,
                         )
                     )
-                    log.info("%-38s ep %3d  %-7s  %4d steps  %.1fs",
-                             label, episode, "success" if success else "failure", length,
+                    log.info("%-38s ep %3d  state %-4s  %-7s  %4d steps  %.1fs",
+                             label, episode, "-" if states[episode] is None else states[episode],
+                             "success" if success else "failure", length,
                              records[-1].wall_s or 0.0)
     return records
 
