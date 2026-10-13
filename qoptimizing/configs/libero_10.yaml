@@ -1,0 +1,20 @@
+# LIBERO-10: FastWAM's own chunk, refined by gradient ascent on the frozen Q-function.
+#
+#   python -m qoptimizing.eval  --config qoptimizing/configs/libero_10.yaml
+#   python -m qoptimizing.probe --config qoptimizing/configs/libero_10.yaml
+#
+# Inherits benchmark, checkpoints, cameras and the rollout protocol from the Q-Planning
+# config. Its `planner` block is not used here. With qopt.steps=0 this is the baseline.
+extends: ../../configs/libero_10/qplanning_offline.yaml
+
+run_name: libero_10_qopt
+
+qopt:
+  steps: 10              # gradient-ascent steps per planning step
+  step_size: 0.01        # BC-normalized units; with normalize_grad, the per-element RMS move per step
+  optimizer: sgd         # sgd | adam
+  normalize_grad: true
+  max_delta: null        # optional per-element trust region around the policy's chunk
+  n_samples: 1           # optimize the policy's single chunk
+  denoise_steps: null    # null -> bc.baseline_denoise_steps (10), as in the baseline
+  log_steps: true        # per-plan Q trajectories to <output_dir>/qopt_steps.jsonl
