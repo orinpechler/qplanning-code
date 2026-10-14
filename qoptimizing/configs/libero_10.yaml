@@ -10,11 +10,13 @@ extends: ../../configs/libero_10/qplanning_offline.yaml
 run_name: libero_10_qopt
 
 qopt:
+  target: action         # action | noise (ascend on FastWAM's initial noise, through the denoiser)
   steps: 10              # gradient-ascent steps per planning step
   step_size: 0.01        # BC-normalized units; with normalize_grad, the per-element RMS move per step
   optimizer: sgd         # sgd | adam
   normalize_grad: true
-  max_delta: null        # optional per-element trust region around the policy's chunk
+  max_delta: null        # optional per-element trust region around the starting chunk (or noise)
+  renorm_noise: true     # noise: keep each noise vector at its original norm
   n_samples: 1           # optimize the policy's single chunk
   denoise_steps: null    # null -> bc.baseline_denoise_steps (10), as in the baseline
   log_steps: true        # per-plan Q trajectories to <output_dir>/qopt_steps.jsonl

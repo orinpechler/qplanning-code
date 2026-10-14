@@ -5,10 +5,13 @@
 Checks, in order:
 
 1. The differentiable BC -> Q action map gives the same Q-values as the planner's own
-   (pipeline-based) scoring path, on both the initial and the optimized chunk.
+   (pipeline-based) scoring path, on both the initial and the optimized chunk. With
+   ``--qopt.target=noise`` the planner additionally checks, on its first step, that the
+   differentiable denoising chain reproduces FastWAM's own sampler.
 2. Q rises over the ascent steps.
 3. Both networks stay frozen: no parameter requires or holds a gradient afterwards, and
    their weights are bit-identical before and after.
+4. The time of one planning step against one baseline FastWAM sample, and peak memory.
 
 Synthetic images make the absolute Q-values meaningless; only the checks matter here.
 """
@@ -117,6 +120,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         failures.append("Q-function weights changed")
     if _fingerprint(policy.bc.sampler.parameters()) != bc_before:
         failures.append("BC policy weights changed")
+
+    # 4. Cost of a planning step, relative to the baseline's single FastWAM sample.
+    def _timed(fn, repeats: int = 3) -> float:
+        import time
+
+        times = []
+        for _ in range(repeats):
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            started = time.perf_counter()
+            with torch.no_grad():
+                fn()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            times.append(time.perf_counter() - started)
+        return min(times)
+
+    sampler = policy.bc.sampler
+    t_plan = _timed(lambda: planner.plan(sampler, batch))
+    t_base = _timed(lambda: sampler.sample_chunks(batch, 1, denoise_steps=planner.denoise_steps))
+    log.info("time per planning step %.2fs vs %.2fs for one baseline sample (%.1fx)",
+             t_plan, t_base, t_plan / max(t_base, 1e-9))
 
     if torch.cuda.is_available():
         log.info("peak GPU memory: %.1f GiB allocated, %.1f GiB reserved (of %.1f GiB)",

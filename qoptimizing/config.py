@@ -22,16 +22,24 @@ class QOptConfig:
     policy's action normalization (roughly one standard deviation per unit).
     """
 
+    # What the ascent moves. "action": the chunk itself. "noise": FastWAM's initial
+    # flow-matching noise; dQ/d(noise) is taken back through every denoising step and the
+    # chunk is regenerated from the updated noise, so it stays a FastWAM sample.
+    target: str = "action"
     steps: int = 10                   # gradient-ascent steps; 0 executes the policy's chunk as-is
     step_size: float = 0.01           # learning rate
     optimizer: str = "sgd"            # sgd | adam
     # sgd only: rescale each chunk's gradient to unit RMS, so every step moves the chunk by
     # `step_size` per element regardless of how flat Q is at that point.
     normalize_grad: bool = True
-    # Optional trust region: clamp each element of (optimized - initial) to [-max_delta, max_delta].
+    # Optional trust region: clamp each element of (optimized - initial) to [-max_delta, max_delta],
+    # in the units of whatever `target` names.
     max_delta: Optional[float] = None
+    # noise only: after each step, rescale every chunk's noise back to its original norm, so it
+    # stays on the shell where Gaussian noise of this size lives and the denoiser stays in
+    # distribution.
+    renorm_noise: bool = True
     # Chunks drawn and optimized in parallel; the one with the highest final Q is executed.
-    # 1 means "optimize the policy's single output", which is the intended setting.
     n_samples: int = 1
     # Flow-matching steps for the initial chunk. None uses bc.baseline_denoise_steps, so that
     # with steps=0 this reproduces the unguided baseline exactly.
@@ -40,6 +48,8 @@ class QOptConfig:
     log_steps: bool = True
 
     def __post_init__(self) -> None:
+        if self.target not in ("action", "noise"):
+            raise ValueError(f"qopt.target must be 'action' or 'noise', got {self.target!r}")
         if self.steps < 0:
             raise ValueError(f"qopt.steps must be >= 0, got {self.steps}")
         if self.step_size <= 0:

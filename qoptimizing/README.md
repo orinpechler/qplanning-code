@@ -8,6 +8,15 @@ executed instead of the policy's own output.
     a_{k+1} = a_k + eta * grad_a Q(o, l, a_k)      k = 0 .. steps-1
     execute a_steps
 
+With `qopt.target=noise` the ascent moves FastWAM's initial noise instead. The gradient of
+Q is taken back through every denoising step, and the executed chunk is the one FastWAM
+denoises from the updated noise, so it is always a FastWAM sample:
+
+    eps_{k+1} = eps_k + eta * grad_eps Q(o, l, FastWAM(o, l, eps_k))
+
+Each noise step costs a forward and a backward pass through the denoiser; the probe reports
+the time per planning step against one baseline sample.
+
 Both networks stay frozen. The Q-function's parameters have `requires_grad=False`, the
 observation context is encoded under `no_grad`, and the gradient is taken with respect to
 the action tensor only. The ascent runs in FastWAM's normalized action space. A
@@ -35,10 +44,12 @@ Settings (`qopt.*`, see `config.py`):
 
 | field | default | meaning |
 |---|---|---|
+| `target` | action | `action`: ascend on the chunk. `noise`: ascend on FastWAM's initial noise, back through the whole denoising chain, and regenerate the chunk |
 | `steps` | 10 | ascent steps; `0` reproduces the baseline |
 | `step_size` | 0.01 | learning rate, in BC-normalized action units |
 | `optimizer` | sgd | `sgd` or `adam` |
 | `normalize_grad` | true | sgd: rescale the gradient to unit RMS per chunk |
-| `max_delta` | null | per-element trust region around the policy's chunk |
+| `max_delta` | null | per-element trust region around the starting chunk (or noise) |
+| `renorm_noise` | true | noise: keep each noise vector at its original norm after every step |
 | `n_samples` | 1 | chunks optimized in parallel; the one with the highest final Q is executed |
 | `denoise_steps` | null | null uses `bc.baseline_denoise_steps` |

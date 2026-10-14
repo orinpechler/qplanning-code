@@ -1,12 +1,21 @@
-"""Gradient ascent on the action chunk against a frozen Q-function.
+"""Gradient ascent against a frozen Q-function, on the action chunk or on FastWAM's noise.
 
-At each planning step:
+At each planning step, with ``qopt.target=action``:
 
     a_0      = FastWAM(o, l)                                  (the baseline chunk)
     a_{k+1}  = a_k + eta * grad_a Q(o, l, a_k)                k = 0 .. steps-1
     execute  a_steps
 
-Nothing but ``a`` receives a gradient. The observation context is encoded once under
+and with ``qopt.target=noise``, through the whole denoising chain D (see :mod:`qoptimizing.noise`):
+
+    eps_0     ~ N(0, I)                                        (the baseline's noise)
+    eps_{k+1} = eps_k + eta * grad_eps Q(o, l, D(eps_k))       k = 0 .. steps-1
+    execute  D(eps_steps)
+
+so the executed chunk is always one FastWAM generated. With ``n_samples`` > 1, N chunks (or
+noises) are optimized in parallel and the one with the highest final Q is executed.
+
+Nothing but ``a`` (or ``eps``) receives a gradient. The observation context is encoded once under
 ``no_grad`` -- so the DINOv2 and T5 encoders are never in the graph -- and the decoder's
 parameters have ``requires_grad`` switched off; ``torch.autograd.grad`` is then taken with
 respect to the action tensor alone.
@@ -26,10 +35,12 @@ map, which is exact and differentiable, instead of the pipelines.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from qoptimizing.noise import FastWAMDenoiser
 from qplanning.planner import PlannerContext, PlanResult, QSpread, QWeightedPlanner, _broadcast
 
 if TYPE_CHECKING:
@@ -38,6 +49,8 @@ if TYPE_CHECKING:
 
     from qoptimizing.config import QOptConfig
     from qplanning.policies.base import BCBundle, BCChunkSampler
+
+log = logging.getLogger("qoptimizing.optimizer")
 
 
 @dataclass
@@ -48,7 +61,7 @@ class QOptStats:
     q_final: float                    # Q of the executed (optimized) chunk
     delta_rms: float                  # RMS change, BC-normalized units
     delta_max: float                  # largest single-element change, BC-normalized units
-    grad_rms_init: float              # RMS of dQ/da at the policy's chunk
+    grad_rms_init: float              # RMS of dQ/da (or dQ/d noise) at the starting point
     q_trajectory: list[float] = field(default_factory=list)   # steps + 1 values
 
     @property
@@ -74,6 +87,7 @@ class QGradientPlanner(QWeightedPlanner):
         super().__init__(cfg=cfg, ctx=ctx, bc_unnormalize=bc_unnormalize)  # type: ignore[arg-type]
         self.denoise_steps = denoise_steps
         self._affine: "tuple[Tensor, Tensor] | None" = None
+        self._noise_checked = False
         self.last_stats: QOptStats | None = None
         #: One entry per planning step since the last reset(), i.e. for the current episode.
         self.episode_stats: list[QOptStats] = []
@@ -100,6 +114,12 @@ class QGradientPlanner(QWeightedPlanner):
                 f"the Q-function scores chunks of length {horizon} but this BC policy emits "
                 f"chunks of length {bc.sampler.chunk_size}. They must match."
             )
+        if cfg.target == "noise":
+            variant = getattr(getattr(getattr(bc.sampler, "policy", None), "config", None), "model_variant", None)
+            if variant != "fastwam":
+                raise ValueError(f"qopt.target=noise needs the FastWAM 'fastwam' variant, got {variant!r}")
+            # The gradient only has to reach the noise; FastWAM's weights stay out of the graph.
+            bc.sampler.policy.requires_grad_(False)
         ctx = PlannerContext(
             q_policy=q_policy,
             q_pre=q_pre,
@@ -118,18 +138,24 @@ class QGradientPlanner(QWeightedPlanner):
         import torch
 
         with torch.no_grad():
-            initial = bc.sample_chunks(batch, self.cfg.n_samples, denoise_steps=self.denoise_steps)
             observation = self._observation_inputs(batch)
-            context = self._encode_observation_once(initial, observation)
+            if self.cfg.target == "noise":
+                denoiser = FastWAMDenoiser.prepare(bc, batch, self.denoise_steps)
+                start = self._draw_noise(bc, batch, denoiser)
+            else:
+                denoiser = None
+                start = bc.sample_chunks(batch, self.cfg.n_samples, denoise_steps=self.denoise_steps)
+            # Both read only the shape, device and dtype of `start`, and the noise has the
+            # chunk's shape -- so neither needs a denoised chunk.
+            context = self._encode_observation_once(start, observation)
             if self._affine is None:
-                self._affine = self._bc_to_q_affine(initial, observation)
+                self._affine = self._bc_to_q_affine(start, observation)
 
-        final, trajectory, grad_rms_init = self._ascend(initial, context)
+        initial, final, trajectory, grad_rms_init = self._ascend(start, context, denoiser)
 
         q_init, q_final = trajectory[0], trajectory[-1]
         best = int(torch.argmax(q_final))
-        a0 = initial.to(final.dtype)
-        delta = final[best] - a0[best]
+        delta = final[best] - initial[best]
         stats = QOptStats(
             q_init=float(q_init[best]),
             q_final=float(q_final[best]),
@@ -148,19 +174,51 @@ class QGradientPlanner(QWeightedPlanner):
             std=float(q_final.std()) if q_final.numel() > 1 else 0.0,
         )
         self.last_spread = spread
-        chunk = final[best : best + 1].to(dtype=initial.dtype, device=initial.device)
+        chunk = final[best : best + 1]
         return PlanResult(chunk=chunk, q_values=q_final, spread=spread, candidates=final)
 
     # ── internals ──────────────────────────────────────────────────────────────────────
+    def _draw_noise(self, bc: "BCChunkSampler", batch: dict[str, "Tensor"],
+                    denoiser: FastWAMDenoiser) -> "Tensor":
+        """FastWAM's initial noise, drawn exactly as its own sampler would draw it.
+
+        On the first call, also runs FastWAM's sampler from the same RNG state and checks
+        that the transcribed chain turns this noise into the same chunks.
+        """
+        import torch
+
+        state = torch.get_rng_state()
+        noise = denoiser.draw_noise(self.cfg.n_samples)
+        if not self._noise_checked:
+            after = torch.get_rng_state()
+            torch.set_rng_state(state)
+            reference = bc.sample_chunks(batch, self.cfg.n_samples, denoise_steps=self.denoise_steps)
+            torch.set_rng_state(after)
+            ours = denoiser(noise)
+            reference = reference.to(device=ours.device, dtype=ours.dtype)
+            error = float((ours - reference).abs().max())
+            log.info("noise chain vs FastWAM's own sampler: max |diff| %.2e", error)
+            if error > 1e-2 * max(1.0, float(reference.abs().max())):
+                raise RuntimeError(
+                    f"the differentiable denoising chain disagrees with FastWAM's sampler (max "
+                    f"error {error:.2e}); qoptimizing.noise no longer matches infer_action."
+                )
+            self._noise_checked = True
+        return noise.to(denoiser.model.device)
+
     def _ascend(
-        self, initial: "Tensor", context: "Tensor"
-    ) -> "tuple[Tensor, list[Tensor], Tensor | None]":
-        """Run the gradient ascent. Returns the final chunks, Q at every iterate, and the
-        initial gradient RMS per chunk."""
+        self, start: "Tensor", context: "Tensor", denoiser: FastWAMDenoiser | None
+    ) -> "tuple[Tensor, Tensor, list[Tensor], Tensor | None]":
+        """Run the gradient ascent on ``start`` -- the chunks themselves, or with a
+        ``denoiser`` the noise they are denoised from.
+
+        Returns the initial and final chunks, Q at every iterate, and the initial gradient
+        RMS per chunk (w.r.t. whatever is optimized).
+        """
         import torch
 
         cfg = self.cfg
-        n_samples = initial.shape[0]
+        n_samples = start.shape[0]
         scale, shift = self._affine  # type: ignore[misc]
 
         # The rollout calls select_action under no_grad, so autograd has to be switched back
@@ -168,36 +226,47 @@ class QGradientPlanner(QWeightedPlanner):
         # torch.inference_mode, which can never enter an autograd graph.
         with torch.inference_mode(False), torch.enable_grad():
             context_n = context.detach().clone().expand(-1, n_samples, -1).contiguous()
-            a0 = initial.detach().clone().float()
-            actions = a0.clone().requires_grad_(True)
-            optimizer = torch.optim.Adam([actions], lr=cfg.step_size) if cfg.optimizer == "adam" else None
+            x0 = start.detach().clone().float()
+            x = x0.clone().requires_grad_(True)
+            norm0 = x0.flatten(1).norm(dim=1).view(-1, 1, 1)
+            optimizer = torch.optim.Adam([x], lr=cfg.step_size) if cfg.optimizer == "adam" else None
 
             trajectory: list[Tensor] = []
             grad_rms_init: "Tensor | None" = None
+            initial: "Tensor | None" = None
             for step in range(cfg.steps + 1):
-                q = self._q_values(actions, context_n, scale, shift)       # (N,)
+                # The last iterate is only scored, never stepped from, so it needs no graph.
+                # With steps=0 (best-of-N selection) that keeps the decoder's activations
+                # for all N chunks out of memory.
+                with torch.set_grad_enabled(step < cfg.steps):
+                    chunks = denoiser(x) if denoiser is not None else x
+                    q = self._q_values(chunks, context_n, scale, shift)   # (N,)
                 trajectory.append(q.detach())
+                if initial is None:
+                    initial = chunks.detach().clone()
                 if step == cfg.steps:
                     break
                 # Chunks are scored independently, so the gradient of the sum is the
-                # per-chunk gradient. Taken w.r.t. `actions` only.
-                (grad,) = torch.autograd.grad(q.sum(), actions)
+                # per-chunk gradient. Taken w.r.t. `x` only.
+                (grad,) = torch.autograd.grad(q.sum(), x)
                 grad_rms = grad.pow(2).mean(dim=(1, 2), keepdim=True).sqrt()
                 if grad_rms_init is None:
                     grad_rms_init = grad_rms.flatten()
                 with torch.no_grad():
                     if optimizer is not None:
-                        actions.grad = -grad          # the optimizer minimizes; we ascend
+                        x.grad = -grad                # the optimizer minimizes; we ascend
                         optimizer.step()
-                        actions.grad = None
+                        x.grad = None
                     else:
                         if cfg.normalize_grad:
                             grad = grad / grad_rms.clamp_min(1e-12)
-                        actions.add_(cfg.step_size * grad)
+                        x.add_(cfg.step_size * grad)
                     if cfg.max_delta is not None:
-                        actions.copy_(a0 + (actions - a0).clamp(-cfg.max_delta, cfg.max_delta))
+                        x.copy_(x0 + (x - x0).clamp(-cfg.max_delta, cfg.max_delta))
+                    if denoiser is not None and cfg.renorm_noise:
+                        x.mul_(norm0 / x.flatten(1).norm(dim=1).view(-1, 1, 1).clamp_min(1e-12))
 
-        return actions.detach(), trajectory, grad_rms_init
+        return initial, chunks.detach(), trajectory, grad_rms_init  # type: ignore[return-value]
 
     def _q_values(self, actions_bc: "Tensor", context_n: "Tensor", scale: "Tensor",
                   shift: "Tensor") -> "Tensor":
@@ -247,8 +316,9 @@ class QGradientPlanner(QWeightedPlanner):
 
     def __repr__(self) -> str:  # pragma: no cover
         cfg = self.cfg
+        noise = f"renorm_noise={cfg.renorm_noise}, " if cfg.target == "noise" else ""
         return (
-            f"QGradientPlanner(steps={cfg.steps}, step_size={cfg.step_size}, "
-            f"optimizer={cfg.optimizer}, normalize_grad={cfg.normalize_grad}, "
+            f"QGradientPlanner(target={cfg.target}, steps={cfg.steps}, step_size={cfg.step_size}, "
+            f"{noise}optimizer={cfg.optimizer}, normalize_grad={cfg.normalize_grad}, "
             f"max_delta={cfg.max_delta}, N={cfg.n_samples}, denoise_steps={self.denoise_steps})"
         )
