@@ -56,14 +56,10 @@ class QOptEpisodeRecord(EpisodeRecord):
 def build_policy(cfg: "QOptRunConfig", env_cfg: Any) -> "QPlanningPolicy":
     """FastWAM, the Q-gradient planner, and the usual action queue.
 
-    FastWAM draws its flow-matching noise from the global RNG, and loading the Q-function
-    (module initialisation before the weights are read) advances that RNG. The RNG state is
-    therefore restored to where it is right after FastWAM is built -- the point the baseline
-    starts rolling out from -- so that both runs see the same noise draws and, with
-    ``qopt.steps=0``, the same actions.
+    The noise of every planning step is seeded per (episode seed, plan index) by
+    :meth:`QPlanningPolicy.set_episode_seed`, so this run sees the baseline's noise draws
+    and, with ``qopt.steps=0``, takes the baseline's actions.
     """
-    from lerobot.utils.random_utils import get_rng_state, set_rng_state
-
     from qoptimizing.optimizer import QGradientPlanner
     from qplanning.configuration_qfunction import assert_matches_checkpoint
     from qplanning.policies.registry import build_bc
@@ -73,7 +69,6 @@ def build_policy(cfg: "QOptRunConfig", env_cfg: Any) -> "QPlanningPolicy":
         raise ConfigError("Q-gradient optimization needs a Q-function: set paths.q_checkpoint")
 
     bc = build_bc(cfg.bc, env_cfg=env_cfg)
-    rng_state = get_rng_state()
     denoise_steps = (cfg.qopt.denoise_steps if cfg.qopt.denoise_steps is not None
                      else cfg.bc.baseline_denoise_steps)
     planner = QGradientPlanner.build(
@@ -84,7 +79,6 @@ def build_policy(cfg: "QOptRunConfig", env_cfg: Any) -> "QPlanningPolicy":
         denoise_steps=denoise_steps,
     )
     assert_matches_checkpoint(cfg.qfunction, planner.ctx.q_policy.config)
-    set_rng_state(rng_state)
     return QPlanningPolicy(bc=bc, planner=planner, n_action_steps=cfg.execution.n_action_steps)
 
 

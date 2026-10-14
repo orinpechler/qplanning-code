@@ -64,6 +64,7 @@ def run_episode(env: Any, policy: Any, processors: dict[str, Any], seed: int) ->
     from lerobot.envs.utils import add_envs_task, preprocess_observation
     from lerobot.utils.constants import ACTION
 
+    policy.set_episode_seed(seed)
     policy.reset()
     observation, _ = env.reset(seed=[seed])
 

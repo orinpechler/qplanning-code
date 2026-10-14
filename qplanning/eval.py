@@ -82,6 +82,8 @@ def run_episode(
     import torch
     from lerobot.scripts.lerobot_eval import rollout
 
+    # Same seed as the environment, so every run sees the same noise at each planning step.
+    policy.set_episode_seed(seed)
     policy.reset()
 
     outcome = rollout(
