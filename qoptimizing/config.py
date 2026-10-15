@@ -39,8 +39,11 @@ class QOptConfig:
     # stays on the shell where Gaussian noise of this size lives and the denoiser stays in
     # distribution.
     renorm_noise: bool = True
-    # Chunks drawn and optimized in parallel; the one with the highest final Q is executed.
+    # Chunks drawn and optimized in parallel; `select` picks which one is executed.
     n_samples: int = 1
+    # Which of the N chunks to execute, by final Q: "best" (highest) or "worst" (lowest).
+    # "worst" is a diagnostic: if Q ranks actions by how well they do, best should beat it.
+    select: str = "best"
     # Flow-matching steps for the initial chunk. None uses bc.baseline_denoise_steps, so that
     # with steps=0 this reproduces the unguided baseline exactly.
     denoise_steps: Optional[int] = None
@@ -50,6 +53,8 @@ class QOptConfig:
     def __post_init__(self) -> None:
         if self.target not in ("action", "noise"):
             raise ValueError(f"qopt.target must be 'action' or 'noise', got {self.target!r}")
+        if self.select not in ("best", "worst"):
+            raise ValueError(f"qopt.select must be 'best' or 'worst', got {self.select!r}")
         if self.steps < 0:
             raise ValueError(f"qopt.steps must be >= 0, got {self.steps}")
         if self.step_size <= 0:

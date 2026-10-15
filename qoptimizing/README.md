@@ -51,5 +51,6 @@ Settings (`qopt.*`, see `config.py`):
 | `normalize_grad` | true | sgd: rescale the gradient to unit RMS per chunk |
 | `max_delta` | null | per-element trust region around the starting chunk (or noise) |
 | `renorm_noise` | true | noise: keep each noise vector at its original norm after every step |
-| `n_samples` | 1 | chunks optimized in parallel; the one with the highest final Q is executed |
+| `n_samples` | 1 | chunks optimized in parallel; `select` picks which one is executed |
+| `select` | best | `best`: highest final Q. `worst`: lowest, a diagnostic for whether Q's ranking matters |
 | `denoise_steps` | null | null uses `bc.baseline_denoise_steps` |

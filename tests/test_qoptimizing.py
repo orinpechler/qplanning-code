@@ -106,6 +106,21 @@ def test_action_target_takes_the_plain_normalized_step():
     assert grad_rms is not None and bool((grad_rms > 0).all())
 
 
+@pytest.mark.parametrize("select", ["best", "worst"])
+def test_select_executes_the_highest_or_lowest_scoring_chunk(select):
+    from test_planner_math import DummyBC
+
+    planner = _planner(steps=0, n_samples=8, select=select)
+    planner._affine = None   # let plan() read the BC -> Q map off the stub pipelines
+    batch = {"observation.images.image": torch.randn(1, 16)}
+    result = planner.plan(DummyBC(chunk_size=H, action_dim=A), batch)
+    pick = torch.argmax if select == "best" else torch.argmin
+    assert torch.equal(result.chunk[0], result.candidates[int(pick(result.q_values))])
+    stats = planner.last_stats
+    assert stats.q_final == pytest.approx(float(result.q_values.max() if select == "best" else result.q_values.min()))
+    assert stats.q_cand_min <= stats.q_final <= stats.q_cand_max and stats.best_worst_rms > 0
+
+
 def test_unknown_target_is_refused():
     with pytest.raises(ValueError, match="target"):
         QOptConfig(target="latent")

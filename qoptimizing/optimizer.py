@@ -13,7 +13,8 @@ and with ``qopt.target=noise``, through the whole denoising chain D (see :mod:`q
     execute  D(eps_steps)
 
 so the executed chunk is always one FastWAM generated. With ``n_samples`` > 1, N chunks (or
-noises) are optimized in parallel and the one with the highest final Q is executed.
+noises) are optimized in parallel and the one with the highest final Q is executed -- or,
+with ``select=worst``, the lowest, as a check that Q's ranking matters for success.
 
 Nothing but ``a`` (or ``eps``) receives a gradient. The observation context is encoded once under
 ``no_grad`` -- so the DINOv2 and T5 encoders are never in the graph -- and the decoder's
@@ -63,6 +64,11 @@ class QOptStats:
     delta_max: float                  # largest single-element change, BC-normalized units
     grad_rms_init: float              # RMS of dQ/da (or dQ/d noise) at the starting point
     q_trajectory: list[float] = field(default_factory=list)   # steps + 1 values
+    # Across the N candidates, by final Q: how far apart they score, and how far apart the
+    # highest- and lowest-scoring chunks are (RMS, BC-normalized units). Zero when N = 1.
+    q_cand_min: float = 0.0
+    q_cand_max: float = 0.0
+    best_worst_rms: float = 0.0
 
     @property
     def q_gain(self) -> float:
@@ -154,15 +160,19 @@ class QGradientPlanner(QWeightedPlanner):
         initial, final, trajectory, grad_rms_init = self._ascend(start, context, denoiser)
 
         q_init, q_final = trajectory[0], trajectory[-1]
-        best = int(torch.argmax(q_final))
-        delta = final[best] - initial[best]
+        chosen = int(torch.argmax(q_final) if self.cfg.select == "best" else torch.argmin(q_final))
+        delta = final[chosen] - initial[chosen]
+        hi, lo = int(torch.argmax(q_final)), int(torch.argmin(q_final))
         stats = QOptStats(
-            q_init=float(q_init[best]),
-            q_final=float(q_final[best]),
+            q_init=float(q_init[chosen]),
+            q_final=float(q_final[chosen]),
             delta_rms=float(delta.pow(2).mean().sqrt()),
             delta_max=float(delta.abs().max()),
-            grad_rms_init=float(grad_rms_init[best]) if grad_rms_init is not None else 0.0,
-            q_trajectory=[float(q[best]) for q in trajectory],
+            grad_rms_init=float(grad_rms_init[chosen]) if grad_rms_init is not None else 0.0,
+            q_trajectory=[float(q[chosen]) for q in trajectory],
+            q_cand_min=float(q_final[lo]),
+            q_cand_max=float(q_final[hi]),
+            best_worst_rms=float((final[hi] - final[lo]).pow(2).mean().sqrt()),
         )
         self.last_stats = stats
         self.episode_stats.append(stats)
@@ -174,7 +184,7 @@ class QGradientPlanner(QWeightedPlanner):
             std=float(q_final.std()) if q_final.numel() > 1 else 0.0,
         )
         self.last_spread = spread
-        chunk = final[best : best + 1]
+        chunk = final[chosen : chosen + 1]
         return PlanResult(chunk=chunk, q_values=q_final, spread=spread, candidates=final)
 
     # ── internals ──────────────────────────────────────────────────────────────────────
@@ -320,5 +330,6 @@ class QGradientPlanner(QWeightedPlanner):
         return (
             f"QGradientPlanner(target={cfg.target}, steps={cfg.steps}, step_size={cfg.step_size}, "
             f"{noise}optimizer={cfg.optimizer}, normalize_grad={cfg.normalize_grad}, "
-            f"max_delta={cfg.max_delta}, N={cfg.n_samples}, denoise_steps={self.denoise_steps})"
+            f"max_delta={cfg.max_delta}, N={cfg.n_samples}, select={cfg.select}, "
+            f"denoise_steps={self.denoise_steps})"
         )
