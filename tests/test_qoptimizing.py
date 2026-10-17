@@ -121,6 +121,25 @@ def test_select_executes_the_highest_or_lowest_scoring_chunk(select):
     assert stats.q_cand_min <= stats.q_final <= stats.q_cand_max and stats.best_worst_rms > 0
 
 
+def test_chunk_at_pads_with_the_last_action_of_the_episode():
+    import numpy as np
+
+    from qoptimizing.qrank import chunk_at
+
+    actions = np.arange(20, dtype=np.float32).reshape(10, 2)       # frames 0..9, 2 dims
+    assert chunk_at(actions, 2, 6, 3, 2).tolist() == [[6, 7], [8, 9]]
+    # Past the episode end (frame 5 is its last), the last action repeats.
+    assert chunk_at(actions, 2, 6, 4, 4).tolist() == [[8, 9], [10, 11], [10, 11], [10, 11]]
+
+
+def test_summarize_counts_ties_as_half():
+    from qoptimizing.qrank import summarize
+
+    s = summarize([0.2, -0.1, 0.0, 0.3])
+    assert s["n"] == 4 and s["rank_acc"] == pytest.approx(0.625) and s["gap_mean"] == pytest.approx(0.1)
+    assert summarize([])["n"] == 0
+
+
 def test_unknown_target_is_refused():
     with pytest.raises(ValueError, match="target"):
         QOptConfig(target="latent")

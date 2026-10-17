@@ -1,0 +1,22 @@
+# LIBERO-10: the ranking-margin fine-tune again, from the released checkpoint, with a much
+# stronger ranking signal.
+#
+# The first run (finetune_q_rank.yaml: weight 1, lr 3e-5, 0.7 epoch) left the margin loss flat
+# at ~0.10 for all 8000 steps: the TD loss (~15x larger) dominated and Q's ranking barely
+# moved (matched swap 0.47 -> 0.47, shift8 0.11 -> 0.12 on the held-out episodes). Here the
+# margin term is weighted to the same order as TD, the decoder learns 3x faster, and it
+# trains for ~1.5 epochs. Same negatives and held-out split as before, so qrank compares
+# directly with qrank_base / qrank_ft.
+extends: finetune_q_rank.yaml
+
+run_name: libero_10_finetune_q_rank_strong
+
+train_q:
+  steps: 15000            # 15000 x 24 = 360k samples, ~1.5 passes over the training frames
+  optimizer_lr: 1.0e-4
+  optimizer_lr_backbone: 3.0e-5
+  lr_warmup_steps: 500
+  lr_decay_steps: 15000
+  save_freq: 2500
+  ranking:
+    weight: 10.0          # margin (~0.1 at the start) x 10 ~ the TD cross-entropy (~1.4)

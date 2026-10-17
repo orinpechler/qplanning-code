@@ -1,0 +1,48 @@
+# LIBERO-10: fine-tune the existing Q-function with the ranking-margin loss.
+#
+# The released Q was trained by TD on successful demonstrations only, so nothing ever told
+# it that one action is better than another at the same state -- and in rollouts its ranking
+# of FastWAM's samples made no difference to success (best-of-64 vs worst-of-64: 183 vs 182
+# of 200). This continues from that checkpoint, keeps the TD loss, and adds
+#   weight * mean(relu(delta + Q(s, a_neg) - Q(s, a_true)))
+# over negatives built from the same batch, on the demonstration samples.
+#
+#   PYTHONHASHSEED=0 qplanning train-q --config configs/libero_10/finetune_q_rank.yaml
+#
+# PYTHONHASHSEED must be fixed: the fork seeds its held-out episode split with hash(), so
+# without it the split differs per process and the offline check could not use the same
+# held-out episodes (see qoptimizing/qrank.py).
+extends: train_q.yaml
+
+run_name: libero_10_finetune_q_rank
+
+train_q:
+  init_from: ${cfg:paths.q_checkpoint}
+  # One GPU: this adjusts a trained critic; 8000 x 24 samples is ~0.8 of a pass over the
+  # training frames. Batch 24, not the from-scratch 48: the fork scores every negative by
+  # copying its sample's observation context through the decoder with gradients, so memory
+  # grows with batch x negative types (48 x 8 did not fit in 94 GB).
+  num_gpus: 1
+  num_workers: 14         # the H100 job has 16 CPUs; image decoding, not the GPU, sets the pace
+  batch_size: 24
+  steps: 8000
+  # A tenth of the from-scratch rates, with a short warmup: this adjusts a trained critic.
+  optimizer_lr: 3.0e-5
+  optimizer_lr_backbone: 9.0e-6
+  lr_warmup_steps: 250
+  lr_decay_steps: 8000
+  save_freq: 1000
+  ranking:
+    weight: 1.0
+    delta: 0.1
+    # Smoothed perturbations of the true chunk, in per-dimension stds. 0.5 is the smallest:
+    # demanding a 0.1 drop in Q for much smaller changes would assert values the data
+    # cannot support (a slightly perturbed chunk usually still succeeds).
+    tube_sigmas: [0.5, 1.0, 2.0]
+    # Six negative chunks per sample. Off: the random swap (subsumed by the matched one) and
+    # the time-reversed chunk (an unnatural action, trivially ranked low) -- they cost as much
+    # memory as the informative ones.
+    swap: false           # another sample's chunk
+    matched_swap: true    # another episode's chunk at the same point in the task -- the hard case
+    temporal: false       # the true chunk reversed in time
+    shift: true           # the right actions at the wrong time (8 and 16 frames later)
