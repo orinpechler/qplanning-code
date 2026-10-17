@@ -35,6 +35,11 @@ class QOptConfig:
     # Optional trust region: clamp each element of (optimized - initial) to [-max_delta, max_delta],
     # in the units of whatever `target` names.
     max_delta: Optional[float] = None
+    # Soft trust region: ascend J(a) = Q(a) - lambda * ||a - a_0||^2 instead of Q alone, so the
+    # gradient gains a -2 * lambda * (a_k - a_0) pull back towards the policy's chunk a_0. In
+    # BC-normalized action units; with target=noise the penalty is still on the denoised chunk,
+    # and its gradient is taken back through the denoiser. 0 disables it.
+    anchor_weight: float = 0.0
     # noise only: after each step, rescale every chunk's noise back to its original norm, so it
     # stays on the shell where Gaussian noise of this size lives and the denoiser stays in
     # distribution.
@@ -63,6 +68,8 @@ class QOptConfig:
             raise ValueError(f"qopt.optimizer must be 'sgd' or 'adam', got {self.optimizer!r}")
         if self.max_delta is not None and self.max_delta <= 0:
             raise ValueError(f"qopt.max_delta must be > 0 or null, got {self.max_delta}")
+        if self.anchor_weight < 0:
+            raise ValueError(f"qopt.anchor_weight must be >= 0, got {self.anchor_weight}")
         if self.n_samples <= 0:
             raise ValueError(f"qopt.n_samples must be > 0, got {self.n_samples}")
         if self.denoise_steps is not None and self.denoise_steps <= 0:

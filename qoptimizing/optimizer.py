@@ -3,8 +3,12 @@
 At each planning step, with ``qopt.target=action``:
 
     a_0      = FastWAM(o, l)                                  (the baseline chunk)
-    a_{k+1}  = a_k + eta * grad_a Q(o, l, a_k)                k = 0 .. steps-1
+    a_{k+1}  = a_k + eta * grad_a J(a_k)                      k = 0 .. steps-1
+    J(a)     = Q(o, l, a) - lambda * ||a - a_0||^2           (lambda = qopt.anchor_weight)
     execute  a_steps
+
+so with lambda > 0 each step is pulled back towards the policy's chunk by -2 lambda (a_k - a_0);
+lambda = 0 is plain ascent on Q. Candidates are still ranked by Q alone.
 
 and with ``qopt.target=noise``, through the whole denoising chain D (see :mod:`qoptimizing.noise`):
 
@@ -257,10 +261,15 @@ class QGradientPlanner(QWeightedPlanner):
                 if step == cfg.steps:
                     break
                 # Chunks are scored independently, so the gradient of the sum is the
-                # per-chunk gradient. Taken w.r.t. `x` only.
-                (grad,) = torch.autograd.grad(q.sum(), x)
+                # per-chunk gradient. Taken w.r.t. `x` only. With an anchor, the objective is
+                # Q - lambda * ||a - a_0||^2, whose action gradient is dQ/da - 2 lambda (a - a_0).
+                objective = q
+                if cfg.anchor_weight > 0:
+                    objective = q - cfg.anchor_weight * (chunks - initial).pow(2).sum(dim=(1, 2))
+                (grad,) = torch.autograd.grad(objective.sum(), x)
                 grad_rms = grad.pow(2).mean(dim=(1, 2), keepdim=True).sqrt()
                 if grad_rms_init is None:
+                    # At a = a_0 the anchor term is zero, so this is still the RMS of dQ/dx.
                     grad_rms_init = grad_rms.flatten()
                 with torch.no_grad():
                     if optimizer is not None:
@@ -330,6 +339,6 @@ class QGradientPlanner(QWeightedPlanner):
         return (
             f"QGradientPlanner(target={cfg.target}, steps={cfg.steps}, step_size={cfg.step_size}, "
             f"{noise}optimizer={cfg.optimizer}, normalize_grad={cfg.normalize_grad}, "
-            f"max_delta={cfg.max_delta}, N={cfg.n_samples}, select={cfg.select}, "
+            f"max_delta={cfg.max_delta}, anchor_weight={cfg.anchor_weight}, N={cfg.n_samples}, select={cfg.select}, "
             f"denoise_steps={self.denoise_steps})"
         )

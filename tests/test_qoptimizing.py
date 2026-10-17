@@ -106,6 +106,30 @@ def test_action_target_takes_the_plain_normalized_step():
     assert grad_rms is not None and bool((grad_rms > 0).all())
 
 
+def test_anchor_adds_the_pull_back_to_the_policy_chunk():
+    """With anchor_weight = lambda, the step is eta * (dQ/da - 2 lambda (a_k - a_0))."""
+    eta, lam, a0, context = 0.05, 3.0, _start(2), _context()
+    plain = dict(target="action", step_size=eta, normalize_grad=False)
+    _, a1, _, _ = _planner(steps=1, anchor_weight=lam, **plain)._ascend(a0, context, None)
+    _, a2, _, _ = _planner(steps=2, anchor_weight=lam, **plain)._ascend(a0, context, None)
+
+    planner = _planner(**plain)
+    a = a1.clone().requires_grad_(True)
+    q = planner._q_values(a, context.expand(-1, 2, -1).contiguous(), *planner._affine)
+    (dq,) = torch.autograd.grad(q.sum(), a)
+    assert torch.allclose(a2 - a1, eta * (dq - 2 * lam * (a1 - a0)), rtol=1e-3, atol=1e-6)
+
+
+def test_anchor_keeps_the_chunk_closer_to_the_policy():
+    a0, context = _start(), _context()
+    moved = {}
+    for lam in (0.0, 50.0):
+        _, final, _, _ = _planner(target="action", steps=20, step_size=0.01, normalize_grad=False,
+                                  anchor_weight=lam)._ascend(a0, context, None)
+        moved[lam] = float((final - a0).norm())
+    assert moved[50.0] < moved[0.0]
+
+
 @pytest.mark.parametrize("select", ["best", "worst"])
 def test_select_executes_the_highest_or_lowest_scoring_chunk(select):
     from test_planner_math import DummyBC
@@ -138,6 +162,11 @@ def test_summarize_counts_ties_as_half():
     s = summarize([0.2, -0.1, 0.0, 0.3])
     assert s["n"] == 4 and s["rank_acc"] == pytest.approx(0.625) and s["gap_mean"] == pytest.approx(0.1)
     assert summarize([])["n"] == 0
+
+
+def test_negative_anchor_is_refused():
+    with pytest.raises(ValueError, match="anchor_weight"):
+        QOptConfig(anchor_weight=-1.0)
 
 
 def test_unknown_target_is_refused():
