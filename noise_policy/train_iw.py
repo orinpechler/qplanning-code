@@ -57,8 +57,13 @@ def collect(ctx: "TrainContext", state: dict[str, Any]) -> "tuple[Tensor, Tensor
         "q_spread": float(q.max() - q.min()),
         "q_std": float(q.std()),
         "ess_frac": float(effective_sample_size(weights)) / m,
+        "max_weight": float(weights.max()),
         "weighted_q_gain": float((weights * q).sum() - q.mean()),
     }
+    if log_ratio is not None:
+        # The proposal correction log N(eps) - log pi(eps): 0 while pi = N(0, I). When its
+        # spread grows past ~1, a few samples dominate whatever Q says.
+        metrics["log_ratio_std"] = float(log_ratio.std())
     return noise, weights, metrics
 
 

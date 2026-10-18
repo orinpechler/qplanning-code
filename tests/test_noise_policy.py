@@ -235,3 +235,28 @@ def test_flow_reversal_round_trips_and_refinement_makes_it_exact():
     assert error(2) < plain
     # And it recovers the noise itself, not just some noise with the same chunk.
     assert torch.allclose(denoiser.invert(chunks, refine_iters=20), noise.float(), atol=1e-6)
+
+
+def test_transform_is_the_reparameterization_and_kl_is_zero_at_the_prior():
+    dist = _dist(b=2)
+    base = torch.randn(2, 4, H, A)
+    noise = dist.transform(base)
+    assert torch.allclose(noise, dist.mean[:, None] + dist.std[:, None] * base)
+    prior = NoiseDistribution(mean=torch.zeros(1, H, A), log_std=torch.zeros(1, H, A), horizon=H)
+    assert torch.equal(prior.transform(base[:1]), base[:1])
+    assert torch.allclose(prior.kl_to_standard_normal(), torch.zeros(1))
+    expected = torch.distributions.kl_divergence(
+        torch.distributions.Normal(dist.mean, dist.std), torch.distributions.Normal(0.0, 1.0)).sum(dim=(-2, -1))
+    assert torch.allclose(dist.kl_to_standard_normal(), expected, atol=1e-5)
+
+
+def test_policy_stats_separate_global_and_state_dependent_shifts():
+    from noise_policy.training import _policy_stats
+
+    shared = NoiseDistribution(mean=torch.full((4, H, A), 0.3), log_std=torch.zeros(4, H, A), horizon=H)
+    stats = _policy_stats(shared)
+    assert abs(stats["policy/mu_global_rms"] - 0.3) < 1e-6 and stats["policy/mu_across_states_std"] == 0.0
+    per_state = NoiseDistribution(mean=torch.tensor([0.3, -0.3, 0.3, -0.3]).view(4, 1, 1).expand(4, H, A).clone(),
+                                  log_std=torch.zeros(4, H, A), horizon=H)
+    stats = _policy_stats(per_state)
+    assert stats["policy/mu_global_rms"] < 1e-6 and stats["policy/mu_across_states_std"] > 0.3

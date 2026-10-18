@@ -145,7 +145,7 @@ class FastWAMDenoiser:
             latents = model.infer_action_scheduler.step(velocity, delta, latents)
         return latents.float()
 
-    def invert(self, chunks: "Tensor", refine_iters: int = 0) -> "Tensor":
+    def invert(self, chunks: "Tensor", refine_iters: int = 0, trace: "list[Tensor] | None" = None) -> "Tensor":
         """Flow reversal: the noise that :meth:`__call__` turns into ``chunks``.
 
         The forward chain is K Euler steps of the flow ODE from sigma = 1 (noise) to 0 (action),
@@ -164,7 +164,8 @@ class FastWAMDenoiser:
             x_k <- x_{k+1} - delta_k * v(x_k, t_k),
 
         which makes the forward step from x_k land on x_{k+1} exactly once it converges. Costs
-        (1 + refine_iters) * K velocity evaluations; returns ``(N, H, A)`` float32 noise.
+        (1 + refine_iters) * K velocity evaluations; returns ``(N, H, A)`` float32 noise. With
+        ``trace``, appends every x_k (k = K-1 down to 0) as float32, for diagnostics.
         """
         model, p = self.model, self._p
         timesteps, deltas = p["timesteps"], p["deltas"]
@@ -175,6 +176,8 @@ class FastWAMDenoiser:
             for _ in range(refine_iters):
                 previous = latents - deltas[k] * self._velocity(previous, timesteps[k])
             latents = previous.to(model.torch_dtype)
+            if trace is not None:
+                trace.append(latents.float())
         return latents.float()
 
     def _velocity(self, latents: "Tensor", t: "Tensor") -> "Tensor":

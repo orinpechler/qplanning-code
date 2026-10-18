@@ -192,6 +192,13 @@ def run(cfg: "NoisePolicyRunConfig", ctx: TrainContext, collect: Collect, loss_f
     if error > 1e-2:
         raise RuntimeError(f"the noise-driven FastWAM chain disagrees with FastWAM's sampler ({error:.2e})")
 
+    monitor = Monitor(ctx, seed=cfg.seed + 1) if train.monitor_states > 0 else None
+    if monitor is not None:
+        progress = monitor(ctx)
+        log.info("monitor before training: %s", _fmt(progress))
+        if wandb_run is not None:
+            wandb_run.log(progress, step=0)
+
     log.info("labelling %d warm-up states", train.warmup_states)
     collected: dict[str, float] = {}
     while len(buffer) < train.warmup_states:
@@ -224,9 +231,8 @@ def run(cfg: "NoisePolicyRunConfig", ctx: TrainContext, collect: Collect, loss_f
         with torch.no_grad():
             window["train/loss"].append(float(loss))
             window["train/grad_norm"].append(float(grad_norm))
-            window["policy/mean_abs_mu"].append(float(dist.mean.abs().mean()))
-            window["policy/mean_std"].append(float(dist.std.mean()))
-            window["policy/entropy_per_dim"].append(float(dist.entropy().mean() / dist.n_free))
+            for key, value in _policy_stats(dist).items():
+                window[key].append(value)
             # The fit: how far the targets sit from the policy mean, in policy stds.
             window["policy/target_z_rms"].append(float(
                 ((noise[:, :, : dist.mean.shape[1]] - dist.mean.unsqueeze(1)) / dist.std.unsqueeze(1))
@@ -244,11 +250,108 @@ def run(cfg: "NoisePolicyRunConfig", ctx: TrainContext, collect: Collect, loss_f
                 wandb_run.log(metrics, step=step)
             window.clear()
             started = time.time()
+        if monitor is not None and (step % train.monitor_freq == 0 or step == train.steps):
+            progress = monitor(ctx)
+            log.info("monitor at step %d: %s", step, _fmt(progress))
+            if wandb_run is not None:
+                wandb_run.log(progress, step=step)
+            started += progress["monitor/seconds"]     # keep seconds_per_step about training
         if step % train.save_freq == 0 or step == train.steps:
             save_checkpoint(ctx, output_dir / "checkpoints" / f"{step:06d}", step)
 
     if wandb_run is not None:
         wandb_run.finish()
+
+
+class Monitor:
+    """pi against N(0, I) on a fixed set of states, with fixed base draws.
+
+    For each monitored state s and base draws eps_1..S (fixed for the whole run):
+
+        policy noise  mu(s) + sigma(s) * eps_j      prior noise  eps_j
+        policy mean   mu(s)                         prior mean   0
+
+    all denoised by FastWAM and scored by Q. Because the states and draws never change, the
+    difference between evaluations is the policy alone -- the variation between states, which
+    dwarfs any policy effect in the per-round collection statistics, cancels.
+    """
+
+    def __init__(self, ctx: TrainContext, seed: int) -> None:
+        import numpy as np
+        import torch
+
+        train = ctx.cfg.noise_train
+        rng = np.random.default_rng(seed)
+        batch = ctx.states.batch(ctx.states.sample(train.monitor_states, rng))
+        self.states = [ctx.states.row(batch, i) for i in range(train.monitor_states)]
+        generator = torch.Generator().manual_seed(seed)
+        shape = (train.monitor_states, train.monitor_samples, ctx.policy.n_queries, ctx.policy.action_dim)
+        self.base = torch.randn(shape, generator=generator)
+
+    def __call__(self, ctx: TrainContext) -> dict[str, float]:
+        import numpy as np
+        import torch
+
+        from noise_policy.fastwam import prepare
+
+        started = time.time()
+        rows: dict[str, list[float]] = defaultdict(list)
+        was_training = ctx.policy.training
+        ctx.policy.eval()
+        prior = ctx.prior()
+        s = self.base.shape[1]
+        with torch.no_grad():
+            for state, base in zip(self.states, self.base):
+                base = base.unsqueeze(0).to(prior.mean.device)                  # (1, S, K, A)
+                dist = ctx.distribution(state)
+                noise = torch.cat([
+                    dist.transform(base)[0],                                     # S policy draws
+                    prior.transform(base)[0],                                    # S prior draws
+                    dist.transform(torch.zeros_like(base[:, :1]))[0],            # policy mean
+                    prior.transform(torch.zeros_like(base[:, :1]))[0],           # zero noise
+                ])
+                denoiser = prepare(ctx.sampler, state, ctx.denoise_steps)
+                chunks = denoiser(noise)
+                q = ctx.planner.score(chunks, ctx.planner.encode(state, chunks))
+                q_pi, q_prior = q[:s], q[s : 2 * s]
+                a_pi, a_prior = chunks[:s], chunks[s : 2 * s]
+                rows["q_policy"].append(float(q_pi.mean()))
+                rows["q_prior"].append(float(q_prior.mean()))
+                rows["q_gain"].append(float(q_pi.mean() - q_prior.mean()))
+                # Same base draw, policy vs prior: how often the policy's chunk scores higher.
+                rows["paired_win_rate"].append(float((q_pi > q_prior).float().mean()))
+                rows["q_gain_best_of_samples"].append(float(q_pi.max() - q_prior.max()))
+                rows["q_gain_mean_noise"].append(float(q[2 * s] - q[2 * s + 1]))
+                rows["action_shift_rms"].append(float((a_pi - a_prior).pow(2).mean().sqrt()))
+                rows["action_spread_policy"].append(float(a_pi.std(dim=0).mean()))
+                rows["action_spread_prior"].append(float(a_prior.std(dim=0).mean()))
+                rows["noise_norm_ratio"].append(float(
+                    noise[:s].flatten(1).norm(dim=1).mean() / noise[s : 2 * s].flatten(1).norm(dim=1).mean()))
+        ctx.policy.train(was_training)
+        out = {f"monitor/{k}": float(np.mean(v)) for k, v in rows.items()}
+        gains = np.asarray(rows["q_gain"])
+        out["monitor/q_gain_stderr"] = float(gains.std(ddof=1) / np.sqrt(len(gains))) if len(gains) > 1 else 0.0
+        out["monitor/states_improved_frac"] = float((gains > 0).mean())
+        out["monitor/seconds"] = time.time() - started
+        return out
+
+
+def _policy_stats(dist: "NoiseDistribution") -> dict[str, float]:
+    """How pi looks on an update batch: distance from N(0, I), and whether its shift is a
+    single global offset or depends on the state."""
+    mean = dist.mean
+    return {
+        "policy/mean_abs_mu": float(mean.abs().mean()),
+        "policy/mean_std": float(dist.std.mean()),
+        "policy/std_min": float(dist.std.min()),
+        "policy/std_max": float(dist.std.max()),
+        "policy/entropy_per_dim": float(dist.entropy().mean() / dist.n_free),
+        "policy/kl_to_prior_per_dim": float(dist.kl_to_standard_normal().mean() / dist.n_free),
+        # RMS of the batch-average mean: the part of the shift shared by all states.
+        "policy/mu_global_rms": float(mean.mean(dim=0).pow(2).mean().sqrt()),
+        # Spread of the mean across states: the part that steers per state.
+        "policy/mu_across_states_std": float(mean.std(dim=0).mean()) if mean.shape[0] > 1 else 0.0,
+    }
 
 
 def _stored_inputs(batch: dict[str, Any], policy_cfg: Any) -> "tuple[Tensor, list[str], Tensor]":

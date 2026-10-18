@@ -102,16 +102,24 @@ class NoiseTrainConfig:
 
     log_freq: int = 20
     save_freq: int = 1000
+    # Progress of pi on a fixed set of demonstration states, before training and every
+    # `monitor_freq` updates: Q of FastWAM's chunks from pi's noise against N(0, I) noise, with
+    # the same base draws (eps_pi = mu + sigma * eps, eps_prior = eps) so only pi changes.
+    monitor_states: int = 32
+    monitor_samples: int = 32         # base draws per monitored state
+    monitor_freq: int = 200
     data: DemoStatesConfig = field(default_factory=DemoStatesConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
     def __post_init__(self) -> None:
-        for name in ("steps", "batch_size", "samples_per_state", "states_per_round",
-                     "updates_per_round", "buffer_states", "log_freq", "save_freq"):
+        for name in ("steps", "batch_size", "samples_per_state", "states_per_round", "updates_per_round",
+                     "buffer_states", "log_freq", "save_freq", "monitor_samples", "monitor_freq"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"noise_train.{name} must be > 0, got {getattr(self, name)}")
         if not self.batch_size <= self.warmup_states <= self.buffer_states:
             raise ValueError("noise_train needs batch_size <= warmup_states <= buffer_states")
+        if self.monitor_states < 0:
+            raise ValueError("noise_train.monitor_states must be >= 0 (0 turns monitoring off)")
         if self.states_per_round > self.buffer_states:
             raise ValueError("noise_train.states_per_round must fit in the buffer")
 

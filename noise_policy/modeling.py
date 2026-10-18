@@ -63,8 +63,15 @@ class NoiseDistribution:
         """``(B, n_samples, H, A)`` noise, reparameterized (differentiable in mean and std)."""
         shape = (self.mean.shape[0], n_samples, *self.mean.shape[1:])
         eps = torch.randn(shape, generator=generator, device=self.mean.device, dtype=self.mean.dtype)
-        z = self.mean.unsqueeze(1) + self.std.unsqueeze(1) * eps
-        return self._to_noise(z)
+        return self.transform(eps)
+
+    def transform(self, base: Tensor) -> Tensor:
+        """``(B, n, K, A)`` standard-normal draws -> ``(B, n, H, A)`` noise from this distribution.
+
+        With the same ``base``, policy and prior noise differ only by the policy, which is
+        what lets training compare them on common random numbers.
+        """
+        return self._to_noise(self.mean.unsqueeze(1) + self.std.unsqueeze(1) * base)
 
     def log_prob(self, noise: Tensor) -> Tensor:
         """Log density of ``(B, n, H, A)`` noise; returns ``(B, n)``."""
@@ -77,6 +84,10 @@ class NoiseDistribution:
     def entropy(self) -> Tensor:
         """``(B,)``."""
         return torch.distributions.Normal(self.mean, self.std).entropy().sum(dim=(-2, -1))
+
+    def kl_to_standard_normal(self) -> Tensor:
+        """KL(pi || N(0, I)) over the free values, ``(B,)``: how far from FastWAM's own noise."""
+        return (0.5 * (self.mean.pow(2) + self.std.pow(2) - 1.0) - self.log_std).sum(dim=(-2, -1))
 
 
 class _DecoderLayer(nn.Module):
