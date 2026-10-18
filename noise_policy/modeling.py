@@ -32,8 +32,11 @@ class NoiseDistribution:
     """A diagonal Gaussian over (H, A) noise, possibly shared across time.
 
     ``mean`` and ``log_std`` are ``(B, K, A)`` with K = H (full) or K = 1 (time-shared). Noise
-    is always handed out as ``(..., H, A)``; with K = 1 its H rows are identical, and densities
-    are over the K x A free values only.
+    is always handed out as ``(..., H, A)``; with K = 1 its H rows are identical.
+
+    Time-shared densities are per row, averaged over the H rows: for replicated noise that is
+    exactly the density of its one free (A,) draw, and for any other noise (a flow-reversed
+    target, say) it is the shared Gaussian fitted to all H rows.
     """
 
     mean: Tensor
@@ -48,11 +51,13 @@ class NoiseDistribution:
     def time_shared(self) -> bool:
         return self.mean.shape[1] == 1 and self.horizon > 1
 
+    @property
+    def n_free(self) -> int:
+        """How many values one draw actually has: K x A."""
+        return self.mean.shape[1] * self.mean.shape[2]
+
     def _to_noise(self, z: Tensor) -> Tensor:
         return z.expand(*z.shape[:-2], self.horizon, z.shape[-1]) if self.time_shared else z
-
-    def _free(self, noise: Tensor) -> Tensor:
-        return noise[..., :1, :] if self.time_shared else noise
 
     def sample(self, n_samples: int = 1, generator: torch.Generator | None = None) -> Tensor:
         """``(B, n_samples, H, A)`` noise, reparameterized (differentiable in mean and std)."""
@@ -63,10 +68,11 @@ class NoiseDistribution:
 
     def log_prob(self, noise: Tensor) -> Tensor:
         """Log density of ``(B, n, H, A)`` noise; returns ``(B, n)``."""
-        z = self._free(noise)
-        mean, log_std = self.mean.unsqueeze(1), self.log_std.unsqueeze(1)
-        normal = torch.distributions.Normal(mean, log_std.exp())
-        return normal.log_prob(z).sum(dim=(-2, -1))
+        normal = torch.distributions.Normal(self.mean.unsqueeze(1), self.std.unsqueeze(1))
+        per_element = normal.log_prob(noise)                       # broadcasts K = 1 over H
+        if self.time_shared:
+            return per_element.mean(dim=-2).sum(dim=-1)
+        return per_element.sum(dim=(-2, -1))
 
     def entropy(self) -> Tensor:
         """``(B,)``."""
@@ -180,6 +186,18 @@ class NoisePolicy(nn.Module):
 
     def trainable_parameters(self) -> list[nn.Parameter]:
         return [p for p in self.parameters() if p.requires_grad]
+
+    _FROZEN = ("image_backbone.", "text_encoder.")
+
+    def trainable_state_dict(self) -> dict[str, Tensor]:
+        """Everything but the frozen encoders, which :meth:`build` recreates (~10M of ~424M)."""
+        return {k: v for k, v in self.state_dict().items() if not k.startswith(self._FROZEN)}
+
+    def load_trainable_state_dict(self, state: dict[str, Tensor]) -> None:
+        missing, unexpected = self.load_state_dict(state, strict=False)
+        missing = [k for k in missing if not k.startswith(self._FROZEN)]
+        if missing or unexpected:
+            raise KeyError(f"noise policy checkpoint mismatch: missing {missing}, unexpected {unexpected}")
 
     # ── forward ────────────────────────────────────────────────────────────────────────
     def forward(self, images: Tensor, texts: list[str], state: Tensor) -> NoiseDistribution:

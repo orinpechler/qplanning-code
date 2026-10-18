@@ -40,6 +40,11 @@ class QOptConfig:
     # BC-normalized action units; with target=noise the penalty is still on the denoised chunk,
     # and its gradient is taken back through the denoiser. 0 disables it.
     anchor_weight: float = 0.0
+    # Keep the gripper (the last action dimension) at the policy's value throughout. It is
+    # executed as open/close only, so continuous gripper changes do nothing on the robot and
+    # would only inflate Q. Applies to target=noise too: the regenerated chunk keeps the
+    # starting chunk's gripper.
+    freeze_gripper: bool = True
     # noise only: after each step, rescale every chunk's noise back to its original norm, so it
     # stays on the shell where Gaussian noise of this size lives and the denoiser stays in
     # distribution.

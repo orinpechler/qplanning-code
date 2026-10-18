@@ -1,0 +1,26 @@
+# LIBERO-10: train the noise policy on flow-reversed, Q-improved actions.
+#
+#   python -m noise_policy.train_reversal --config noise_policy/configs/libero_10_reversal.yaml
+#
+# Same policy, states and loop as libero_10_iw.yaml; only the labelling differs.
+extends: libero_10_iw.yaml
+
+run_name: libero_10_noise_reversal
+
+noise_train:
+  samples_per_state: 8      # each sample costs an ascent, a reversal and a round-trip check
+
+reversal:
+  start: policy             # a_0 = FastWAM(eps_0), eps_0 ~ pi(.|s) (the notes) | prior: eps_0 ~ N(0, I)
+  improve:                  # the s30 anchored ascent of the qopt rollouts
+    target: action
+    steps: 30
+    step_size: 0.01
+    optimizer: sgd
+    normalize_grad: true
+    anchor_weight: 1.0      # lambda in Q(a) - lambda ||a - a_0||^2
+    freeze_gripper: true    # the gripper is executed as open/close only: keep it at a_0's value
+  # Extra fixed-point passes per reversal step; 0 = plain backward Euler. The improvement moves
+  # the action by only ~0.01-0.05 RMS, so the reversal has to be more accurate than that to
+  # keep it -- watch collect/roundtrip_error_rel (< 1 keeps most of the improvement).
+  refine_iters: 2

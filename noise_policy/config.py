@@ -1,9 +1,12 @@
-"""Configuration of the noise policy's architecture."""
+"""Configuration of the noise policy: its architecture, and the two ways of training it."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Optional
+
+from qoptimizing.config import QOptConfig
+from qplanning.config.schema import RunConfig, WandbConfig
 
 
 @dataclass
@@ -55,3 +58,110 @@ class NoisePolicyConfig:
             raise ValueError(f"image_size must be a multiple of DINOv2's patch size 14, got {self.image_size}")
         if not self.log_std_min < 0.0 < self.log_std_max:
             raise ValueError("log_std_min < 0 < log_std_max is needed so the policy can start at N(0, I)")
+
+
+@dataclass
+class DemoStatesConfig:
+    """Where training states come from: single frames of the demonstrations."""
+
+    repo_id: str = "HuggingFaceVLA/libero"
+    root: Optional[str] = None        # null -> paths.dataset_root
+    # Only frames of this LIBERO suite's tasks ("libero_10", ...); null uses every frame.
+    suite: Optional[str] = "libero_10"
+
+
+@dataclass
+class NoiseTrainConfig:
+    """The loop both training scripts share.
+
+    Training alternates collection rounds and policy updates. A round draws
+    ``states_per_round`` demonstration states, labels ``samples_per_state`` noises for each
+    (how depends on the script) and pushes them into a FIFO replay buffer; then
+    ``updates_per_round`` gradient steps are taken on batches of ``batch_size`` states drawn
+    from the buffer.
+    """
+
+    steps: int = 4000                 # policy updates in total
+    batch_size: int = 32              # states per update (each with all its samples)
+    lr: float = 1.0e-4
+    weight_decay: float = 1.0e-4
+    lr_warmup_steps: int = 100
+    grad_clip_norm: float = 1.0
+
+    samples_per_state: int = 16       # M
+    states_per_round: int = 32
+    updates_per_round: int = 16
+    warmup_states: int = 64           # labelled before the first update
+    # Replay capacity, in states. Small on purpose: a state is dropped after
+    # buffer_states / states_per_round rounds (8 by default, i.e. 128 updates), so targets
+    # labelled with an old policy do not linger. How often each state is reused is set by
+    # batch_size * updates_per_round / states_per_round (16 by default), not by this.
+    buffer_states: int = 256
+    # FastWAM flow steps, for sampling and for the reversal. null -> bc.baseline_denoise_steps.
+    denoise_steps: Optional[int] = None
+
+    log_freq: int = 20
+    save_freq: int = 1000
+    data: DemoStatesConfig = field(default_factory=DemoStatesConfig)
+    wandb: WandbConfig = field(default_factory=WandbConfig)
+
+    def __post_init__(self) -> None:
+        for name in ("steps", "batch_size", "samples_per_state", "states_per_round",
+                     "updates_per_round", "buffer_states", "log_freq", "save_freq"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"noise_train.{name} must be > 0, got {getattr(self, name)}")
+        if not self.batch_size <= self.warmup_states <= self.buffer_states:
+            raise ValueError("noise_train needs batch_size <= warmup_states <= buffer_states")
+        if self.states_per_round > self.buffer_states:
+            raise ValueError("noise_train.states_per_round must fit in the buffer")
+
+
+@dataclass
+class ImportanceWeightConfig:
+    """``train_iw``: weight M sampled noises by softmax(Q / temperature) per state."""
+
+    # Q differences between noises of one state are ~0.01, so tau ~0.01 gives a real preference.
+    temperature: float = 0.01
+    # "policy": eps ~ pi(.|s), reweighted by N(eps) / pi(eps | s) towards the tilted target
+    # N(eps) exp(Q / tau); once pi is good, more of its samples land where Q is high.
+    # "prior": eps ~ N(0, I), as in the notes -- the same target, sampled blindly.
+    proposal: str = "policy"
+
+    def __post_init__(self) -> None:
+        if self.temperature <= 0:
+            raise ValueError(f"iw.temperature must be > 0, got {self.temperature}")
+        if self.proposal not in ("prior", "policy"):
+            raise ValueError(f"iw.proposal must be 'prior' or 'policy', got {self.proposal!r}")
+
+
+@dataclass
+class ReversalConfig:
+    """``train_reversal``: improve the action under Q, flow-reverse it, fit the noise."""
+
+    # Where a_0 = F(s, eps) starts: eps ~ pi(.|s) as in the notes, or eps ~ N(0, I).
+    start: str = "policy"
+    # The improvement: anchored gradient ascent a_{k+1} = a_k + eta grad[Q(a_k) - lambda ||a_k - a_0||^2],
+    # exactly as in the qopt rollouts. lambda is `improve.anchor_weight`; `improve.target` must be
+    # "action" and `improve.n_samples` is unused (noise_train.samples_per_state applies).
+    improve: QOptConfig = field(default_factory=lambda: QOptConfig(steps=30, step_size=0.01, anchor_weight=1.0))
+    # Extra fixed-point passes per reversal step (see FastWAMDenoiser.invert); 0 is plain
+    # backward Euler.
+    refine_iters: int = 0
+
+    def __post_init__(self) -> None:
+        if self.start not in ("policy", "prior"):
+            raise ValueError(f"reversal.start must be 'policy' or 'prior', got {self.start!r}")
+        if self.improve.target != "action":
+            raise ValueError("reversal.improve.target must be 'action'")
+        if self.refine_iters < 0:
+            raise ValueError(f"reversal.refine_iters must be >= 0, got {self.refine_iters}")
+
+
+@dataclass
+class NoisePolicyRunConfig(RunConfig):
+    """A normal run config (benchmark, checkpoints, paths) plus the noise-policy blocks."""
+
+    noise_policy: NoisePolicyConfig = field(default_factory=NoisePolicyConfig)
+    noise_train: NoiseTrainConfig = field(default_factory=NoiseTrainConfig)
+    iw: ImportanceWeightConfig = field(default_factory=ImportanceWeightConfig)
+    reversal: ReversalConfig = field(default_factory=ReversalConfig)

@@ -131,6 +131,9 @@ class DummyBC:
     def unnormalize_actions(self, actions):
         return scale_post(actions)
 
+    def actions_for_q(self, actions):
+        return self.unnormalize_actions(actions)
+
     def to(self, device):
         return self
 

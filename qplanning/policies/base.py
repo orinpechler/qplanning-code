@@ -71,6 +71,17 @@ class BCChunkSampler(Protocol):
         """
         ...
 
+    def actions_for_q(self, actions: "Tensor") -> "Tensor":
+        """Map actions from this policy's normalized space into the raw units the Q-function
+        was trained on -- the dataset's (environment's) action convention.
+
+        Usually just :meth:`unnormalize_actions`. It differs when the policy's own raw units
+        are converted further on the way to the environment (FastWAM's gripper on LIBERO), and
+        it must stay differentiable and per-dimension affine. Only the Q-function's inputs
+        go through this; executed actions never do.
+        """
+        ...
+
     def to(self, device: Any) -> "BCChunkSampler":
         """Move the policy to a device."""
         ...

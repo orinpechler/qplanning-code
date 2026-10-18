@@ -9,7 +9,8 @@ under ``no_grad``. What remains is a pure function of the noise:
     a = denoise(eps)
 
 which this module evaluates with autograd enabled, so dQ(a)/d eps can be taken back through
-every denoising step.
+every denoising step -- and, run backwards (:meth:`FastWAMDenoiser.invert`), maps a chunk back
+to the noise that produces it (flow reversal).
 
 The chain is a transcription of ``FastWAM.infer_action`` (the ``fastwam`` model variant).
 FastWAM wraps its per-step predictor in ``@torch.no_grad()``; the undecorated function is
@@ -138,23 +139,56 @@ class FastWAMDenoiser:
         Differentiable in ``noise`` whenever autograd is enabled.
         """
         model, p = self.model, self._p
-        n = noise.shape[0]
         latents = noise.to(device=model.device, dtype=model.torch_dtype)
-        context = p["context"].expand(n, -1, -1)
-        context_mask = p["context_mask"].expand(n, -1)
-        kv_cache = [{"k": layer["k"].expand(n, -1, -1), "v": layer["v"].expand(n, -1, -1)}
-                    for layer in p["video_kv_cache"]]
         for t, delta in zip(p["timesteps"], p["deltas"]):
-            timestep = t.unsqueeze(0).to(dtype=latents.dtype, device=model.device)
-            velocity = self._predict(
-                model,
-                latents_action=latents,
-                timestep_action=timestep,
-                context=context,
-                context_mask=context_mask,
-                video_kv_cache=kv_cache,
-                attention_mask=p["attention_mask"],
-                video_seq_len=p["video_seq_len"],
-            )
+            velocity = self._velocity(latents, t)
             latents = model.infer_action_scheduler.step(velocity, delta, latents)
         return latents.float()
+
+    def invert(self, chunks: "Tensor", refine_iters: int = 0) -> "Tensor":
+        """Flow reversal: the noise that :meth:`__call__` turns into ``chunks``.
+
+        The forward chain is K Euler steps of the flow ODE from sigma = 1 (noise) to 0 (action),
+
+            x_{k+1} = x_k + delta_k * v(x_k, t_k),        delta_k = sigma_{k+1} - sigma_k < 0.
+
+        Reversal runs the same steps backwards, from x_K = chunk to x_0 = noise, subtracting the
+        velocity that FastWAM predicts at the point and time it is currently at:
+
+            x_k = x_{k+1} - delta_k * v(x_{k+1}, t_{k+1})                 (t_K = 0)
+
+        That is Euler on the same ODE in the opposite direction, so ``denoise(invert(a))`` equals
+        ``a`` only up to the discretization error of both passes. Each of ``refine_iters`` extra
+        passes per step solves the forward step itself for x_k by fixed-point iteration,
+
+            x_k <- x_{k+1} - delta_k * v(x_k, t_k),
+
+        which makes the forward step from x_k land on x_{k+1} exactly once it converges. Costs
+        (1 + refine_iters) * K velocity evaluations; returns ``(N, H, A)`` float32 noise.
+        """
+        model, p = self.model, self._p
+        timesteps, deltas = p["timesteps"], p["deltas"]
+        latents = chunks.to(device=model.device, dtype=model.torch_dtype)
+        for k in reversed(range(len(timesteps))):
+            t_next = timesteps[k + 1] if k + 1 < len(timesteps) else timesteps[k].new_zeros(())
+            previous = latents - deltas[k] * self._velocity(latents, t_next)
+            for _ in range(refine_iters):
+                previous = latents - deltas[k] * self._velocity(previous, timesteps[k])
+            latents = previous.to(model.torch_dtype)
+        return latents.float()
+
+    def _velocity(self, latents: "Tensor", t: "Tensor") -> "Tensor":
+        """FastWAM's action velocity at ``latents`` and timestep ``t`` (one value for all N)."""
+        model, p = self.model, self._p
+        n = latents.shape[0]
+        return self._predict(
+            model,
+            latents_action=latents,
+            timestep_action=t.unsqueeze(0).to(dtype=latents.dtype, device=model.device),
+            context=p["context"].expand(n, -1, -1),
+            context_mask=p["context_mask"].expand(n, -1),
+            video_kv_cache=[{"k": layer["k"].expand(n, -1, -1), "v": layer["v"].expand(n, -1, -1)}
+                            for layer in p["video_kv_cache"]],
+            attention_mask=p["attention_mask"],
+            video_seq_len=p["video_seq_len"],
+        )

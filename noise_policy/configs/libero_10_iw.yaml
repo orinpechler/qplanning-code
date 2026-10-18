@@ -1,0 +1,43 @@
+# LIBERO-10: train the noise policy with Q-based importance weights.
+#
+#   python -m noise_policy.train_iw --config noise_policy/configs/libero_10_iw.yaml
+#
+# Inherits benchmark, checkpoints and cameras from the Q-Planning config; its `planner` block
+# is not used. States are frames of the LIBERO-10 demonstrations.
+extends: ../../configs/libero_10/qplanning_offline.yaml
+
+run_name: libero_10_noise_iw
+
+paths:
+  # The ranking-fine-tuned Q-function used by the latest qopt rollouts.
+  q_checkpoint: ${cfg:paths.root}/runs/libero_10_finetune_q_rank_strong/checkpoints/last/pretrained_model
+
+noise_policy:
+  noise_mode: full          # full: (32, 7) mean/log-std | time_shared: one (7,) Gaussian, replicated over time
+  dim_model: 512
+  n_heads: 8
+  n_layers: 2
+
+noise_train:
+  steps: 4000
+  batch_size: 32
+  lr: 1.0e-4
+  samples_per_state: 16     # M noises per state
+  states_per_round: 32
+  updates_per_round: 16
+  warmup_states: 64          # labelled before the first update
+  buffer_states: 256        # FIFO: a state is dropped after 8 rounds (128 updates)
+  denoise_steps: null       # null -> bc.baseline_denoise_steps (10), as in the rollouts
+  log_freq: 20
+  save_freq: 1000
+  data:
+    repo_id: HuggingFaceVLA/libero
+    root: ${cfg:paths.dataset_root}
+    suite: libero_10
+  wandb:
+    project: ${env:QPLANNING_WANDB_PROJECT:}
+    entity: ${env:QPLANNING_WANDB_ENTITY:}
+
+iw:
+  temperature: 0.01         # Q gaps between noises of one state are ~0.01
+  proposal: policy          # policy: eps ~ pi, reweighted by N / pi | prior: eps ~ N(0, I) (the notes)

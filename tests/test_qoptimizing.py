@@ -40,6 +40,8 @@ class StubDenoiser:
 
 
 def _planner(**cfg):
+    # The ascent math is pinned down with every dimension free; the frozen gripper has its own tests.
+    cfg.setdefault("freeze_gripper", False)
     planner = QGradientPlanner(
         cfg=QOptConfig(**cfg),
         ctx=PlannerContext(q_policy=StubQPolicyWithProj(), q_pre=identity_pre,
@@ -172,3 +174,33 @@ def test_negative_anchor_is_refused():
 def test_unknown_target_is_refused():
     with pytest.raises(ValueError, match="target"):
         QOptConfig(target="latent")
+
+
+# ── frozen gripper ─────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("anchor", [0.0, 1.0])
+def test_frozen_gripper_keeps_the_policy_gripper_and_moves_only_the_arm(anchor):
+    planner, a0 = _planner(target="action", steps=3, step_size=0.01, anchor_weight=anchor,
+                           freeze_gripper=True), _start()
+    _, final, trajectory, _ = planner._ascend(a0, _context(), None)
+    assert torch.equal(final[..., -1], a0[..., -1])
+    # Normalized over the arm alone: each step moves the arm elements by step_size (RMS).
+    first = _planner(target="action", steps=1, step_size=0.01, freeze_gripper=True)
+    _, one, _, _ = first._ascend(a0, _context(), None)
+    move = (one - a0)[..., :-1].pow(2).mean(dim=(1, 2)).sqrt()
+    assert torch.allclose(move, torch.full_like(move, 0.01), atol=1e-6)
+    # Q is scored on the chunk that will be executed, i.e. with the policy's gripper.
+    scale, shift = planner._affine
+    q_final = planner._q_values(final, _context().expand(-1, 3, -1).contiguous(), scale, shift)
+    assert torch.allclose(trajectory[-1], q_final)
+
+
+def test_frozen_gripper_with_noise_ascent_keeps_the_starting_gripper():
+    planner, denoiser, eps0 = (_planner(target="noise", steps=2, step_size=0.1, freeze_gripper=True),
+                               StubDenoiser(), _start())
+    initial, final, _, _ = planner._ascend(eps0, _context(), denoiser)
+    assert torch.equal(final[..., -1], initial[..., -1])
+    assert not torch.allclose(final[..., :-1], initial[..., :-1])
+
+
+def test_gripper_is_frozen_by_default():
+    assert QOptConfig().freeze_gripper

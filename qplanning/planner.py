@@ -164,7 +164,8 @@ class QWeightedPlanner:
             if planner_seed is not None
             else None
         )
-        return cls(cfg=cfg, ctx=ctx, bc_unnormalize=bc.sampler.unnormalize_actions,
+        # actions_for_q, not unnormalize_actions: Q reads actions in the dataset convention.
+        return cls(cfg=cfg, ctx=ctx, bc_unnormalize=bc.sampler.actions_for_q,
                    generator=generator)
 
     def reset(self) -> None:
@@ -230,7 +231,7 @@ class QWeightedPlanner:
 
         n_samples, horizon, action_dim = candidates.shape
 
-        # BC-normalized -> raw units -> Q-normalized.
+        # BC-normalized -> raw units in the Q-function's (dataset) convention -> Q-normalized.
         raw = self._bc_unnormalize(candidates.reshape(n_samples * horizon, action_dim))
         raw = raw.reshape(n_samples, horizon, action_dim).to(candidates.device)
 

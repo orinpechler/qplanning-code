@@ -136,7 +136,8 @@ class QGradientPlanner(QWeightedPlanner):
             camera_keys=tuple(q_policy.config.camera_keys),
             horizon=horizon,
         )
-        return cls(cfg=cfg, ctx=ctx, bc_unnormalize=bc.sampler.unnormalize_actions,
+        # actions_for_q, not unnormalize_actions: Q reads actions in the dataset convention.
+        return cls(cfg=cfg, ctx=ctx, bc_unnormalize=bc.sampler.actions_for_q,
                    denoise_steps=denoise_steps)
 
     def reset(self) -> None:
@@ -190,6 +191,35 @@ class QGradientPlanner(QWeightedPlanner):
         self.last_spread = spread
         chunk = final[chosen : chosen + 1]
         return PlanResult(chunk=chunk, q_values=q_final, spread=spread, candidates=final)
+
+    # ── the same pieces on given chunks (used to train a noise policy) ─────────────────
+    def encode(self, batch: dict[str, "Tensor"], like: "Tensor") -> "Tensor":
+        """Encode one observation for :meth:`score` and :meth:`improve`. ``like`` is any
+        ``(N, H, A)`` tensor with the chunks' device and dtype."""
+        import torch
+
+        with torch.no_grad():
+            observation = self._observation_inputs(batch)
+            context = self._encode_observation_once(like, observation)
+            if self._affine is None:
+                self._affine = self._bc_to_q_affine(like, observation)
+        return context
+
+    def score(self, chunks: "Tensor", context: "Tensor") -> "Tensor":
+        """Q of ``(N, H, A)`` BC-normalized chunks at an encoded observation -> ``(N,)``."""
+        import torch
+
+        scale, shift = self._affine  # type: ignore[misc]
+        n_samples = chunks.shape[0]
+        with torch.no_grad():
+            return self._q_values(chunks.float(), context.expand(-1, n_samples, -1).contiguous(), scale, shift)
+
+    def improve(self, chunks: "Tensor", context: "Tensor") -> "tuple[Tensor, list[Tensor]]":
+        """Gradient ascent of the chunks themselves, exactly as a ``target=action`` planning step
+        does (including the anchor to the starting chunks). Returns the final chunks and Q at
+        every iterate."""
+        _, final, trajectory, _ = self._ascend(chunks, context, None)
+        return final, trajectory
 
     # ── internals ──────────────────────────────────────────────────────────────────────
     def _draw_noise(self, bc: "BCChunkSampler", batch: dict[str, "Tensor"],
@@ -254,10 +284,15 @@ class QGradientPlanner(QWeightedPlanner):
                 # for all N chunks out of memory.
                 with torch.set_grad_enabled(step < cfg.steps):
                     chunks = denoiser(x) if denoiser is not None else x
+                    if initial is None:
+                        initial = chunks.detach().clone()
+                    if cfg.freeze_gripper:
+                        # The gripper is executed as open/close only (its sign), so a
+                        # continuous change does nothing on the robot and only moves Q. Hold
+                        # it at the starting chunk's value: as a constant it gets no gradient.
+                        chunks = torch.cat([chunks[..., :-1], initial[..., -1:]], dim=-1)
                     q = self._q_values(chunks, context_n, scale, shift)   # (N,)
                 trajectory.append(q.detach())
-                if initial is None:
-                    initial = chunks.detach().clone()
                 if step == cfg.steps:
                     break
                 # Chunks are scored independently, so the gradient of the sum is the
@@ -267,7 +302,10 @@ class QGradientPlanner(QWeightedPlanner):
                 if cfg.anchor_weight > 0:
                     objective = q - cfg.anchor_weight * (chunks - initial).pow(2).sum(dim=(1, 2))
                 (grad,) = torch.autograd.grad(objective.sum(), x)
-                grad_rms = grad.pow(2).mean(dim=(1, 2), keepdim=True).sqrt()
+                # On the chunk itself a frozen gripper has zero gradient; leave it out of the
+                # RMS so the arm still moves `step_size` per element.
+                free = grad[..., :-1] if cfg.freeze_gripper and denoiser is None else grad
+                grad_rms = free.pow(2).mean(dim=(1, 2), keepdim=True).sqrt()
                 if grad_rms_init is None:
                     # At a = a_0 the anchor term is zero, so this is still the RMS of dQ/dx.
                     grad_rms_init = grad_rms.flatten()
@@ -339,6 +377,6 @@ class QGradientPlanner(QWeightedPlanner):
         return (
             f"QGradientPlanner(target={cfg.target}, steps={cfg.steps}, step_size={cfg.step_size}, "
             f"{noise}optimizer={cfg.optimizer}, normalize_grad={cfg.normalize_grad}, "
-            f"max_delta={cfg.max_delta}, anchor_weight={cfg.anchor_weight}, N={cfg.n_samples}, select={cfg.select}, "
+            f"max_delta={cfg.max_delta}, anchor_weight={cfg.anchor_weight}, freeze_gripper={cfg.freeze_gripper}, N={cfg.n_samples}, select={cfg.select}, "
             f"denoise_steps={self.denoise_steps})"
         )
