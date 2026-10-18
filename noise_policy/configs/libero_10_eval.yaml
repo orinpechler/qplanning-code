@@ -1,0 +1,15 @@
+# LIBERO-10: roll out FastWAM with its noise drawn from a trained noise policy.
+#
+#   python -m noise_policy.eval --config noise_policy/configs/libero_10_eval.yaml \
+#       --noise_eval.checkpoint=libero_10_noise_reversal_anc05_plain --run_name=libero_10_eval_noise_rev_anc05
+#
+# Rollout protocol from qplanning_offline.yaml, as for the baseline and the qopt rollouts. The
+# Q-function (paths.q_checkpoint, from libero_10_iw.yaml) only scores the chunks for logging.
+extends: libero_10_iw.yaml
+
+run_name: libero_10_eval_noise_policy
+
+noise_eval:
+  checkpoint: null          # noise_policy.pt, its directory, a training run's directory, or its run_name
+  use_mean: false           # false: eps = mu + sigma * eps_0 (eps_0 = the baseline's draw) | true: eps = mu
+  log_steps: true           # per-plan stats to <output_dir>/qopt_steps.jsonl

@@ -166,6 +166,20 @@ class ReversalConfig:
 
 
 @dataclass
+class NoiseEvalConfig:
+    """``noise_policy.eval``: roll out FastWAM with its noise drawn from a trained pi."""
+
+    # A noise_policy.pt, a checkpoint directory holding one, or a training run's output
+    # directory (its checkpoints/last is used). The architecture is read from the checkpoint,
+    # so the `noise_policy` block of the run config is ignored.
+    checkpoint: Optional[str] = None
+    # false: eps = mu(s) + sigma(s) * eps_0, with eps_0 the baseline's own draw at that planning
+    # step (common random numbers). true: eps = mu(s), no sampling.
+    use_mean: bool = False
+    log_steps: bool = True            # per-plan stats to <output_dir>/qopt_steps.jsonl
+
+
+@dataclass
 class NoisePolicyRunConfig(RunConfig):
     """A normal run config (benchmark, checkpoints, paths) plus the noise-policy blocks."""
 
@@ -173,3 +187,4 @@ class NoisePolicyRunConfig(RunConfig):
     noise_train: NoiseTrainConfig = field(default_factory=NoiseTrainConfig)
     iw: ImportanceWeightConfig = field(default_factory=ImportanceWeightConfig)
     reversal: ReversalConfig = field(default_factory=ReversalConfig)
+    noise_eval: NoiseEvalConfig = field(default_factory=NoiseEvalConfig)

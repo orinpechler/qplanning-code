@@ -297,3 +297,49 @@ def test_tilt_direction_is_the_weighted_minus_plain_mean():
     q[3] = 10.0           # one sample takes all the weight at low tau
     expected = noise[3].flatten().double() - noise.flatten(1).double().mean(0)
     assert torch.allclose(tilt_direction(noise, q, 0.01), expected, atol=1e-8)
+
+
+# ── the rollout planner ────────────────────────────────────────────────────────────────
+def _eval_planner(monkeypatch, policy: NoisePolicy, use_mean: bool = False):
+    from noise_policy.eval import NoisePolicyPlanner
+    from qoptimizing.config import QOptConfig
+    from qplanning.planner import PlannerContext
+
+    denoiser = _fake_denoiser()
+    monkeypatch.setattr(FastWAMDenoiser, "prepare", classmethod(lambda cls, *a, **k: denoiser))
+    planner = NoisePolicyPlanner(cfg=QOptConfig(target="noise", steps=0),
+                                 ctx=PlannerContext(q_policy=None, q_pre=None, camera_keys=(), horizon=H),
+                                 bc_unnormalize=None, denoise_steps=None).attach(policy, use_mean)
+    base = torch.randn(1, H, A, generator=torch.Generator().manual_seed(5))
+    planner._draw_noise = lambda *a: base
+    planner.encode = lambda batch, like: None
+    planner.score = lambda chunks, context: chunks.float().mean(dim=(1, 2))
+    images, texts, state = _inputs(1)
+    batch = {"observation.images.image": images[:, 0], "observation.images.image2": images[:, 1],
+             "observation.state": state, "task": texts}
+    return planner, denoiser, base, batch
+
+
+def test_eval_planner_at_the_prior_executes_the_baselines_chunk(monkeypatch):
+    planner, denoiser, base, batch = _eval_planner(monkeypatch, _policy())
+    result = planner.plan(None, batch)
+    assert torch.equal(result.chunk, denoiser(base))
+    stats = planner.episode_stats[-1]
+    assert stats.delta_rms == 0.0 and stats.q_init == stats.q_final and stats.noise_shift_rms == 0.0
+
+
+@pytest.mark.parametrize("mode", ["full", "time_shared"])
+def test_eval_planner_maps_the_baselines_draw_through_pi(monkeypatch, mode):
+    policy = _policy(noise_mode=mode)
+    with torch.no_grad():
+        policy.head.bias[:A] = 0.5                      # mu = 0.5
+        policy.head.bias[A:] = math.log(0.5)            # sigma = 0.5
+    planner, denoiser, base, batch = _eval_planner(monkeypatch, policy)
+    result = planner.plan(None, batch)
+    k = H if mode == "full" else 1
+    expected = (0.5 + 0.5 * base[:, :k]).expand(1, H, A)
+    assert torch.allclose(result.chunk, denoiser(expected))
+    assert planner.episode_stats[-1].delta_rms > 0
+
+    planner, denoiser, base, batch = _eval_planner(monkeypatch, policy, use_mean=True)
+    assert torch.allclose(planner.plan(None, batch).chunk, denoiser(torch.full((1, H, A), 0.5)))

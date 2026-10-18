@@ -15,7 +15,7 @@ import csv
 import json
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -109,8 +109,13 @@ def write_records(records: Sequence[QOptEpisodeRecord], path: Path) -> Path:
     return path
 
 
-def evaluate(cfg: "QOptRunConfig", steps_log: Path | None = None) -> list[QOptEpisodeRecord]:
-    """Evaluate every task in this run's (possibly sharded) task list."""
+def evaluate(cfg: "QOptRunConfig", steps_log: Path | None = None,
+             build: Callable[[Any, Any], "QPlanningPolicy"] | None = None) -> list[QOptEpisodeRecord]:
+    """Evaluate every task in this run's (possibly sharded) task list.
+
+    ``build(cfg, env_cfg)`` makes the policy (default :func:`build_policy`); its planner must
+    keep ``episode_stats``, a list of :class:`QOptStats`, like :class:`QGradientPlanner`.
+    """
     from lerobot.envs.factory import make_env_pre_post_processors
 
     from qplanning.eval import run_episode
@@ -130,7 +135,7 @@ def evaluate(cfg: "QOptRunConfig", steps_log: Path | None = None) -> list[QOptEp
         for task in tasks:
             with open_task_envs(cfg, task) as (env_cfg, per_task_envs):
                 if policy is None:
-                    policy = build_policy(cfg, env_cfg)
+                    policy = (build or build_policy)(cfg, env_cfg)
                     env_pre, env_post = make_env_pre_post_processors(
                         env_cfg=env_cfg, policy_cfg=policy.bc.policy_config
                     )
