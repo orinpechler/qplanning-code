@@ -164,7 +164,8 @@ class WandbConfig:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.project)
+        # An unset ${env:...:} reference reaches this str field as "None".
+        return bool(self.project) and self.project not in ("None", "null")
 
 
 @dataclass
@@ -176,6 +177,28 @@ class DatasetConfig:
     bucket_overrides: dict[str, str] = field(default_factory=dict)
     terminal_bonuses: dict[str, float] = field(default_factory=lambda: {"q5": 1.0})
     use_imagenet_stats: bool = False
+
+
+@dataclass
+class RankingLossConfig:
+    """The ranking-margin auxiliary loss of the Q-function fork (off by default).
+
+    For each demonstration sample it adds ``weight * mean(relu(delta + Q(s, a_neg) - Q(s, a_true)))``
+    over batch-internal negative chunks, so Q learns to rank the demonstrated chunk above
+    plausible alternatives -- which is what selecting or optimizing actions with Q relies on,
+    and what TD on demonstrations alone never supervises. Negatives are built in the
+    Q-normalized action space, so a tube sigma of 1.0 is one per-dimension std of the data.
+    """
+
+    weight: float = 0.0               # 0 disables the loss
+    delta: float = 0.1                # margin, in Q units
+    tube_sigmas: list[float] = field(default_factory=lambda: [1.0, 2.0])   # smoothed perturbations
+    tube_smooth_sigma_t: float = 2.0
+    swap: bool = True                 # another sample's true chunk
+    matched_swap: bool = False        # another episode's chunk at the same episode fraction
+    temporal: bool = True             # the true chunk reversed in time
+    shift: bool = False               # the true trajectory's chunk k frames later
+    shift_frames: list[int] = field(default_factory=lambda: [8, 16])
 
 
 @dataclass
@@ -199,6 +222,16 @@ class TrainQConfig:
     test_freq: int = 500
     test_n_batches: int = 1
     resume_from: Optional[str] = None
+    # LeRobot's cudnn_deterministic, which also sets torch.use_deterministic_algorithms(True).
+    # Off: the DINOv2 backbone's bicubic position-embedding resize has no deterministic
+    # backward, so training the backbone fails at the first step with it on.
+    deterministic: bool = False
+    # Fine-tune: start from this checkpoint's weights (online and target network) with a fresh
+    # optimizer and schedule. The architecture, reward and bin settings come from the
+    # checkpoint; the `qfunction` block's are not applied. Unlike resume_from, which continues
+    # an interrupted run, this starts a new one.
+    init_from: Optional[str] = None
+    ranking: RankingLossConfig = field(default_factory=RankingLossConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
 

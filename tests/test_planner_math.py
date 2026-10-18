@@ -354,6 +354,85 @@ def test_baseline_uses_one_sample_and_the_full_denoising_budget():
     assert bc.last_denoise_steps == 10
 
 
+class GlobalRNGBC(DummyBC):
+    """Draws from the global RNG and ignores ``generator``, as FastWAM does."""
+
+    def sample_chunks(self, batch, n_samples, *, denoise_steps=None, generator=None):
+        self.sample_calls += 1
+        return torch.randn(n_samples, self.chunk_size, self.action_dim)
+
+
+class RecordingPlanner(NoPlanner):
+    """Executes candidate 0 of N, keeping every draw."""
+
+    def __init__(self, n_samples=1):
+        super().__init__()
+        self.n_samples = n_samples
+        self.draws = []
+
+    def plan(self, bc, batch):
+        from qplanning.planner import PlanResult
+
+        chunks = bc.sample_chunks(batch, self.n_samples)
+        self.draws.append(chunks.clone())
+        return PlanResult(chunk=chunks[:1])
+
+
+def _rollout_draws(episode_seed, n_plans, n_samples=1, chunk_size=32, action_dim=7):
+    planner = RecordingPlanner(n_samples)
+    policy = QPlanningPolicy(_bundle(GlobalRNGBC(chunk_size, action_dim), 1), planner, n_action_steps=1)
+    policy.set_episode_seed(episode_seed)
+    policy.reset()
+    for _ in range(n_plans):
+        policy.select_action({"observation.images.image": torch.randn(1, StubQNet.CONTEXT_DIM)})
+    return planner.draws
+
+
+def test_plan_noise_depends_only_on_episode_seed_and_plan_index():
+    """Every run sees the same noise at plan k, whatever else touched the RNG before it."""
+    torch.manual_seed(0)
+    a = _rollout_draws(episode_seed=7, n_plans=5)
+    torch.manual_seed(1)
+    torch.randn(1000)
+    b = _rollout_draws(episode_seed=7, n_plans=3)
+    for k in range(3):
+        assert torch.equal(a[k], b[k])
+    assert not torch.equal(a[0], a[1])
+    assert not torch.equal(a[0], _rollout_draws(episode_seed=8, n_plans=1)[0])
+
+
+def test_episode_seed_survives_reset():
+    """LeRobot's rollout calls reset() itself, after the seed has been set."""
+    policy = QPlanningPolicy(_bundle(GlobalRNGBC(), 1), RecordingPlanner(), n_action_steps=1)
+    policy.set_episode_seed(7)
+    policy.reset()
+    policy.select_action({"observation.images.image": torch.randn(1, StubQNet.CONTEXT_DIM)})
+    policy.reset()
+    policy.select_action({"observation.images.image": torch.randn(1, StubQNet.CONTEXT_DIM)})
+    first, second = policy.planner.draws
+    assert torch.equal(first, second)
+
+
+def test_first_of_n_candidates_matches_the_single_draw():
+    """For LIBERO's chunk shape, N > 1 only adds noise; candidate 0 keeps the N=1 draw."""
+    single = _rollout_draws(episode_seed=7, n_plans=2, n_samples=1)
+    many = _rollout_draws(episode_seed=7, n_plans=2, n_samples=16)
+    for k in range(2):
+        assert torch.equal(single[k][0], many[k][0])
+
+
+def test_episode_seed_leaves_the_global_rng_untouched():
+    torch.manual_seed(3)
+    expected = torch.randn(4)
+    torch.manual_seed(3)
+    policy = QPlanningPolicy(_bundle(GlobalRNGBC(), 1), RecordingPlanner(), n_action_steps=1)
+    policy.set_episode_seed(7)
+    policy.reset()
+    obs = {"observation.images.image": torch.zeros(1, StubQNet.CONTEXT_DIM)}
+    policy.select_action(obs)
+    assert torch.equal(torch.randn(4), expected)
+
+
 def test_dummy_bc_satisfies_the_protocol():
     from qplanning.policies.base import BCChunkSampler
 

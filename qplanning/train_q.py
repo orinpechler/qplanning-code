@@ -54,32 +54,21 @@ def build_argv(cfg: "RunConfig") -> list[str]:
         raise ConfigError("train_q.dataset.repo_ids is empty; name the dataset(s) to train on.")
 
     q = cfg.qfunction
+    if train.init_from and train.resume_from:
+        raise ConfigError("train_q.init_from and train_q.resume_from are mutually exclusive.")
+    if train.init_from:
+        # Fine-tuning: architecture, reward and bins are read off the checkpoint itself.
+        init = resolver.resolve(train.init_from).path or train.init_from
+        policy_args = [f"--policy.path={init}"]
+    else:
+        policy_args = ["--policy.type=q_function", *_architecture_args(cfg)]
+
     args: list[str] = [
-        "--policy.type=q_function",
+        *policy_args,
         "--policy.push_to_hub=false",
         f"--job_name={cfg.run_name}",
         f"--output_dir={output_dir}",
-        # Architecture -- must match the checkpoint any downstream planner will load.
-        f"--policy.dino_model_name={q.dino_model_name}",
-        f"--policy.text_encoder_model={q.text_encoder_model}",
-        "--policy.use_text_conditioning=true",
-        f"--policy.dim_model={q.dim_model}",
-        f"--policy.n_heads={q.n_heads}",
-        f"--policy.dim_feedforward={q.dim_feedforward}",
-        f"--policy.n_decoder_layers={q.n_decoder_layers}",
-        # Chunked Bellman target and the categorical value head.
-        f"--policy.camera_keys=[{','.join(q.camera_keys)}]",
-        f"--policy.h={q.h}",
-        f"--policy.gamma={q.gamma}",
-        f"--policy.num_bins={q.num_bins}",
-        f"--policy.v_min={q.v_min}",
-        f"--policy.v_max={q.v_max}",
-        f"--policy.hl_gauss_sigma={q.hl_gauss_sigma}",
-        f"--policy.target_tau={q.target_tau}",
-        f"--policy.reward_mode={q.reward_mode}",
-        f"--policy.step_reward={q.step_reward}",
-        f"--policy.terminal_bonuses={_as_mapping(q.terminal_bonuses)}",
-        f"--policy.bucket_overrides={_as_mapping(train.dataset.bucket_overrides or q.bucket_overrides)}",
+        *_ranking_args(train.ranking),
         # Optimisation.
         f"--policy.optimizer_lr={train.optimizer_lr}",
         f"--policy.optimizer_lr_backbone={train.optimizer_lr_backbone}",
@@ -100,6 +89,7 @@ def build_argv(cfg: "RunConfig") -> list[str]:
         f"--log_freq={train.log_freq}",
         f"--num_workers={train.num_workers}",
         f"--seed={cfg.seed}",
+        f"--cudnn_deterministic={str(train.deterministic).lower()}",
         # A held-out split of episodes, so the logged loss is not purely on training frames.
         f"--test_split_ratio={train.test_split_ratio}",
         f"--test_freq={train.test_freq}",
@@ -124,7 +114,7 @@ def build_argv(cfg: "RunConfig") -> list[str]:
         resume = Path(str(resolver.resolve(train.resume_from).path or train.resume_from))
         args += [f"--config_path={resume / 'train_config.json'}", "--resume=true"]
 
-    launcher = [sys.executable, "-m", "lerobot.scripts.lerobot_train"]
+    launcher = [sys.executable, "-m", "qplanning.lerobot_train"]
     if train.num_gpus > 1:
         launcher = [
             "accelerate", "launch",
@@ -132,9 +122,54 @@ def build_argv(cfg: "RunConfig") -> list[str]:
             "--multi_gpu",
             "--mixed_precision=bf16",
             f"--main_process_port={_free_port()}",
-            "-m", "lerobot.scripts.lerobot_train",
+            "-m", "qplanning.lerobot_train",
         ]
     return [*launcher, *args]
+
+
+def _ranking_args(ranking) -> list[str]:
+    """The fork's ranking-margin loss settings; none at all when the loss is off."""
+    if ranking.weight <= 0:
+        return []
+    return [
+        f"--policy.neg_margin_weight={ranking.weight}",
+        f"--policy.neg_margin_delta={ranking.delta}",
+        f"--policy.neg_tube_sigmas=[{','.join(str(s) for s in ranking.tube_sigmas)}]",
+        f"--policy.neg_tube_smooth_sigma_t={ranking.tube_smooth_sigma_t}",
+        f"--policy.neg_use_swap={str(ranking.swap).lower()}",
+        f"--policy.neg_use_matched_swap={str(ranking.matched_swap).lower()}",
+        f"--policy.neg_use_temporal={str(ranking.temporal).lower()}",
+        f"--policy.neg_use_shift={str(ranking.shift).lower()}",
+        f"--policy.neg_shift_frames=[{','.join(str(k) for k in ranking.shift_frames)}]",
+    ]
+
+
+def _architecture_args(cfg: "RunConfig") -> list[str]:
+    """Architecture, Bellman target and value head of a Q-function trained from scratch."""
+    train, q = cfg.train_q, cfg.qfunction
+    return [
+        # Architecture -- must match the checkpoint any downstream planner will load.
+        f"--policy.dino_model_name={q.dino_model_name}",
+        f"--policy.text_encoder_model={q.text_encoder_model}",
+        "--policy.use_text_conditioning=true",
+        f"--policy.dim_model={q.dim_model}",
+        f"--policy.n_heads={q.n_heads}",
+        f"--policy.dim_feedforward={q.dim_feedforward}",
+        f"--policy.n_decoder_layers={q.n_decoder_layers}",
+        # Chunked Bellman target and the categorical value head.
+        f"--policy.camera_keys=[{','.join(q.camera_keys)}]",
+        f"--policy.h={q.h}",
+        f"--policy.gamma={q.gamma}",
+        f"--policy.num_bins={q.num_bins}",
+        f"--policy.v_min={q.v_min}",
+        f"--policy.v_max={q.v_max}",
+        f"--policy.hl_gauss_sigma={q.hl_gauss_sigma}",
+        f"--policy.target_tau={q.target_tau}",
+        f"--policy.reward_mode={q.reward_mode}",
+        f"--policy.step_reward={q.step_reward}",
+        f"--policy.terminal_bonuses={_as_mapping(q.terminal_bonuses)}",
+        f"--policy.bucket_overrides={_as_mapping(train.dataset.bucket_overrides or q.bucket_overrides)}",
+    ]
 
 
 def _as_mapping(value: dict) -> str:
@@ -175,7 +210,15 @@ def main(config_path: str | None = None, overrides: Sequence[str] | None = None,
     if dry_run:
         return 0
 
+    # LeRobot must create output_dir itself: when it already exists (and this is not a
+    # resume), LeRobot silently trains into "<output_dir>_<timestamp>" instead, and nothing
+    # downstream can find the checkpoints. So never create it first, and refuse a collision.
     output_dir = Path(cfg.paths.output_dir)
+    if output_dir.exists() and not cfg.train_q.resume_from:
+        print(f"output directory {output_dir} already exists; pick a new run_name "
+              "(LeRobot would otherwise train into a timestamped copy of it).")
+        return 1
+    returncode = subprocess.run(argv, check=False).returncode
     output_dir.mkdir(parents=True, exist_ok=True)
     dump(cfg, output_dir / "resolved.yaml")
-    return subprocess.run(argv, check=False).returncode
+    return returncode
