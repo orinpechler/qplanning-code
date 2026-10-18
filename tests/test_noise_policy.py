@@ -260,3 +260,40 @@ def test_policy_stats_separate_global_and_state_dependent_shifts():
                                   log_std=torch.zeros(4, H, A), horizon=H)
     stats = _policy_stats(per_state)
     assert stats["policy/mu_global_rms"] < 1e-6 and stats["policy/mu_across_states_std"] > 0.3
+
+
+# ── tilt probe ─────────────────────────────────────────────────────────────────────────
+from noise_policy.tilt_probe import consistency, tilt_direction  # noqa: E402
+
+
+def _tilt_setup(signal: float, seed: int = 0):
+    g = torch.Generator().manual_seed(seed)
+    noise = torch.randn(256, H, A, generator=g)
+    direction = torch.randn(H * A, generator=g)
+    direction /= direction.norm()
+    shifted = direction + 0.3 * torch.randn(H * A, generator=g) / (H * A) ** 0.5   # a nearby state
+    qs = {}
+    for sid, d in (("a", direction), ("b", shifted), ("c", torch.randn(H * A, generator=g))):
+        qs[sid] = signal * 0.005 * (noise.flatten(1) @ (d / d.norm())) + 0.005 * torch.randn(256, generator=g)
+    pairs = {"near": [("a", "b")], "far": [("a", "c")]}
+    return noise, qs, pairs
+
+
+def test_a_consistent_preference_is_found_and_noise_is_not():
+    noise, qs, pairs = _tilt_setup(signal=2.0)
+    res = consistency(noise, qs, pairs, tau=float("inf"), generator=torch.Generator().manual_seed(1))
+    # A 224-dim direction from 128 noises per half is a noisy estimate: clearly above chance, not near 1.
+    assert res["within"] > 0.15 and abs(res["within_chance"]) < 0.1
+    assert res["near"] > 0.5 and abs(res["far"]) < 0.3
+    noise, qs, pairs = _tilt_setup(signal=0.0)
+    res = consistency(noise, qs, pairs, tau=float("inf"), generator=torch.Generator().manual_seed(1))
+    assert abs(res["within"]) < 0.2 and abs(res["near"]) < 0.3
+
+
+def test_tilt_direction_is_the_weighted_minus_plain_mean():
+    noise = torch.randn(8, H, A)
+    q = torch.zeros(8)
+    assert torch.allclose(tilt_direction(noise, q, 0.01), torch.zeros(H * A, dtype=torch.float64), atol=1e-12)
+    q[3] = 10.0           # one sample takes all the weight at low tau
+    expected = noise[3].flatten().double() - noise.flatten(1).double().mean(0)
+    assert torch.allclose(tilt_direction(noise, q, 0.01), expected, atol=1e-8)
